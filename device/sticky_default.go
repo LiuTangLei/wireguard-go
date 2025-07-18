@@ -3,8 +3,8 @@
 package device
 
 import (
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/rwcancel"
+	"github.com/LiuTangLei/wireguard-go/conn"
+	"github.com/LiuTangLei/wireguard-go/rwcancel"
 )
 
 func (device *Device) startRouteListener(_ conn.Bind) (*rwcancel.RWCancel, error) {

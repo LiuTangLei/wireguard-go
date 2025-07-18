@@ -3,7 +3,7 @@ package awg
 import (
 	"testing"
 
-	"github.com/amnezia-vpn/amneziawg-go/device/awg/internal"
+	"github.com/LiuTangLei/wireguard-go/device/awg/internal"
 	"github.com/stretchr/testify/require"
 )
 
