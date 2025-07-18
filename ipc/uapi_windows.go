@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package ipc
@@ -8,7 +8,7 @@ package ipc
 import (
 	"net"
 
-	"github.com/tailscale/wireguard-go/ipc/namedpipe"
+	"github.com/amnezia-vpn/amneziawg-go/ipc/namedpipe"
 	"golang.org/x/sys/windows"
 )
 
@@ -62,7 +62,7 @@ func init() {
 func UAPIListen(name string) (net.Listener, error) {
 	listener, err := (&namedpipe.ListenConfig{
 		SecurityDescriptor: UAPISecurityDescriptor,
-	}).Listen(`\\.\pipe\ProtectedPrefix\Administrators\WireGuard\` + name)
+	}).Listen(`\\.\pipe\ProtectedPrefix\Administrators\AmneziaWG\` + name)
 	if err != nil {
 		return nil, err
 	}

@@ -1,18 +1,19 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/tailscale/wireguard-go/conn"
+	"github.com/amnezia-vpn/amneziawg-go/conn"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -69,7 +70,10 @@ func (peer *Peer) keepKeyFreshReceiving() {
  * Every time the bind is updated a new routine is started for
  * IPv4 and IPv6 (separately)
  */
-func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc) {
+func (device *Device) RoutineReceiveIncoming(
+	maxBatchSize int,
+	recv conn.ReceiveFunc,
+) {
 	recvName := recv.PrettyName()
 	defer func() {
 		device.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
@@ -125,6 +129,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		}
 		deathSpiral = 0
 
+		device.awg.ASecMux.RLock()
 		// handle each packet in the batch
 		for i, size := range sizes[:count] {
 			if size < MinMessageSize {
@@ -132,9 +137,44 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			}
 
 			// check size of packet
-
 			packet := bufsArrs[i][:size]
-			msgType := binary.LittleEndian.Uint32(packet[:4])
+			var msgType uint32
+			if device.isAWG() {
+				// TODO:
+				// if awg.WaitResponse.ShouldWait.IsSet() {
+				// 	awg.WaitResponse.Channel <- struct{}{}
+				// }
+
+				if assumedMsgType, ok := packetSizeToMsgType[size]; ok {
+					junkSize := msgTypeToJunkSize[assumedMsgType]
+					// transport size can align with other header types;
+					// making sure we have the right msgType
+					msgType = binary.LittleEndian.Uint32(packet[junkSize : junkSize+4])
+					if msgType == assumedMsgType {
+						packet = packet[junkSize:]
+					} else {
+						device.log.Verbosef("transport packet lined up with another msg type")
+						msgType = binary.LittleEndian.Uint32(packet[:4])
+					}
+				} else {
+					transportJunkSize := device.awg.ASecCfg.TransportHeaderJunkSize
+					msgType = binary.LittleEndian.Uint32(packet[transportJunkSize : transportJunkSize+4])
+					if msgType != MessageTransportType {
+						// probably a junk packet
+						device.log.Verbosef("aSec: Received message with unknown type: %d", msgType)
+						continue
+					}
+
+					// remove junk from bufsArrs by shifting the packet
+					// this buffer is also used for decryption, so it needs to be corrected
+					copy(bufsArrs[i][:size], packet[transportJunkSize:])
+					size -= transportJunkSize
+					// need to reinitialize packet as well
+					packet = packet[:size]
+				}
+			} else {
+				msgType = binary.LittleEndian.Uint32(packet[:4])
+			}
 
 			switch msgType {
 
@@ -219,6 +259,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			default:
 			}
 		}
+		device.awg.ASecMux.RUnlock()
 		for peer, elemsContainer := range elemsByPeer {
 			if peer.isRunning.Load() {
 				peer.queue.inbound.c <- elemsContainer
@@ -277,6 +318,8 @@ func (device *Device) RoutineHandshake(id int) {
 
 	for elem := range device.queue.handshake.c {
 
+		device.awg.ASecMux.RLock()
+
 		// handle cookie fields and ratelimiting
 
 		switch elem.msgType {
@@ -286,7 +329,8 @@ func (device *Device) RoutineHandshake(id int) {
 			// unmarshal packet
 
 			var reply MessageCookieReply
-			err := reply.unmarshal(elem.packet)
+			reader := bytes.NewReader(elem.packet)
+			err := binary.Read(reader, binary.LittleEndian, &reply)
 			if err != nil {
 				device.log.Verbosef("Failed to decode cookie reply")
 				goto skip
@@ -303,9 +347,14 @@ func (device *Device) RoutineHandshake(id int) {
 			// consume reply
 
 			if peer := entry.peer; peer.isRunning.Load() {
-				device.log.Verbosef("Receiving cookie response from %s", elem.endpoint.DstToString())
+				device.log.Verbosef(
+					"Receiving cookie response from %s",
+					elem.endpoint.DstToString(),
+				)
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
-					device.log.Verbosef("Could not decrypt invalid cookie response")
+					device.log.Verbosef(
+						"Could not decrypt invalid cookie response",
+					)
 				}
 			}
 
@@ -347,19 +396,17 @@ func (device *Device) RoutineHandshake(id int) {
 
 		switch elem.msgType {
 		case MessageInitiationType:
-
 			// unmarshal
-
 			var msg MessageInitiation
-			err := msg.unmarshal(elem.packet)
+			reader := bytes.NewReader(elem.packet)
+			err := binary.Read(reader, binary.LittleEndian, &msg)
 			if err != nil {
 				device.log.Errorf("Failed to decode initiation message")
 				goto skip
 			}
 
 			// consume initiation
-
-			peer := device.ConsumeMessageInitiation(&msg, elem.endpoint)
+			peer := device.ConsumeMessageInitiation(&msg)
 			if peer == nil {
 				device.log.Verbosef("Received invalid initiation message from %s", elem.endpoint.DstToString())
 				goto skip
@@ -383,7 +430,8 @@ func (device *Device) RoutineHandshake(id int) {
 			// unmarshal
 
 			var msg MessageResponse
-			err := msg.unmarshal(elem.packet)
+			reader := bytes.NewReader(elem.packet)
+			err := binary.Read(reader, binary.LittleEndian, &msg)
 			if err != nil {
 				device.log.Errorf("Failed to decode response message")
 				goto skip
@@ -422,6 +470,7 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.SendKeepalive()
 		}
 	skip:
+		device.awg.ASecMux.RUnlock()
 		device.PutMessageBuffer(elem.buffer)
 	}
 }
@@ -459,9 +508,6 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				peer.SetEndpointFromPacket(elem.endpoint)
 				peer.timersHandshakeComplete()
 				peer.SendStagedPackets()
-			}
-			if ep, ok := elem.endpoint.(conn.PeerAwareEndpoint); ok {
-				ep.FromPeer(peer.handshake.remoteStatic)
 			}
 			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
 
@@ -506,11 +552,17 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				}
 
 			default:
-				device.log.Verbosef("Packet with invalid IP version from %v", peer)
+				device.log.Verbosef(
+					"Packet with invalid IP version from %v",
+					peer,
+				)
 				continue
 			}
 
-			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
+			bufs = append(
+				bufs,
+				elem.buffer[:MessageTransportOffsetContent+len(elem.packet)],
+			)
 		}
 
 		peer.rxBytes.Add(rxBytesLen)

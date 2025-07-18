@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -8,7 +8,7 @@ package device
 import (
 	"fmt"
 
-	"github.com/tailscale/wireguard-go/tun"
+	"github.com/amnezia-vpn/amneziawg-go/tun"
 )
 
 const DefaultMTU = 1420

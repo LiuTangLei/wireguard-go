@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package tun
@@ -17,8 +17,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/tailscale/wireguard-go/conn"
-	"github.com/tailscale/wireguard-go/rwcancel"
+	"github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/amnezia-vpn/amneziawg-go/rwcancel"
 	"golang.org/x/sys/unix"
 )
 
@@ -48,6 +48,10 @@ type NativeTun struct {
 	readOpMu sync.Mutex                    // readOpMu guards readBuff
 	readBuff [virtioNetHdrLen + 65535]byte // if vnetHdr every read() is prefixed by virtioNetHdr
 
+	writeOpMu   sync.Mutex // writeOpMu guards toWrite, tcpGROTable
+	toWrite     []int
+	tcpGROTable *tcpGROTable
+	udpGROTable *udpGROTable
 	writeOpMu   sync.Mutex // writeOpMu guards the following fields
 	toWrite     []int
 	tcpGROTable *tcpGROTable
@@ -362,7 +366,7 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	)
 	tun.toWrite = tun.toWrite[:0]
 	if tun.vnetHdr {
-		err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite)
+        err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite)
 		if err != nil {
 			return 0, err
 		}

@@ -1,16 +1,23 @@
-module github.com/tailscale/wireguard-go
+module github.com/amnezia-vpn/amneziawg-go
 
-go 1.20
+go 1.24.4
 
 require (
-	golang.org/x/crypto v0.13.0
-	golang.org/x/net v0.15.0
-	golang.org/x/sys v0.12.0
+	github.com/stretchr/testify v1.10.0
+	github.com/tevino/abool v1.2.0
+	github.com/tevino/abool/v2 v2.1.0
+	go.uber.org/atomic v1.11.0
+	golang.org/x/crypto v0.39.0
+	golang.org/x/net v0.41.0
+	golang.org/x/sys v0.33.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
-	gvisor.dev/gvisor v0.0.0-20230927004350-cbd86285d259
+	gvisor.dev/gvisor v0.0.0-20231202080848-1f7806d17489
 )
 
 require (
-	github.com/google/btree v1.0.1 // indirect
-	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/google/btree v1.1.3 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	golang.org/x/time v0.9.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

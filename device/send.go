@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -13,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tailscale/wireguard-go/conn"
-	"github.com/tailscale/wireguard-go/tun"
+	"github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/amnezia-vpn/amneziawg-go/tun"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -45,15 +46,11 @@ import (
  */
 
 type QueueOutboundElement struct {
-	buffer *[MaxMessageSize]byte // slice holding the packet data
-	// packet is always a slice of "buffer". The starting offset in buffer
-	// is either:
-	//  a) MessageEncapsulatingTransportSize+MessageTransportHeaderSize (plaintext)
-	//  b) 0 (post-encryption)
-	packet  []byte
-	nonce   uint64   // nonce for encryption
-	keypair *Keypair // keypair for encryption
-	peer    *Peer    // related peer
+	buffer  *[MaxMessageSize]byte // slice holding the packet data
+	packet  []byte                // slice of "buffer" (always!)
+	nonce   uint64                // nonce for encryption
+	keypair *Keypair              // keypair for encryption
+	peer    *Peer                 // related peer
 }
 
 type QueueOutboundElementsContainer struct {
@@ -126,16 +123,66 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		peer.device.log.Errorf("%v - Failed to create initiation message: %v", peer, err)
 		return err
 	}
+	var sendBuffer [][]byte
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageInitiationSize)
-	packet := buf[MessageEncapsulatingTransportSize:]
-	_ = msg.marshal(packet)
+	// so only packet processed for cookie generation
+	var junkedHeader []byte
+	if peer.device.version >= VersionAwg {
+		var junks [][]byte
+		if peer.device.version == VersionAwgSpecialHandshake {
+			peer.device.awg.ASecMux.RLock()
+			// set junks depending on packet type
+			junks = peer.device.awg.HandshakeHandler.GenerateSpecialJunk()
+			if junks == nil {
+				junks = peer.device.awg.HandshakeHandler.GenerateControlledJunk()
+				if junks != nil {
+					peer.device.log.Verbosef("%v - Controlled junks sent", peer)
+				}
+			} else {
+				peer.device.log.Verbosef("%v - Special junks sent", peer)
+			}
+			peer.device.awg.ASecMux.RUnlock()
+		} else {
+			junks = make([][]byte, 0, peer.device.awg.ASecCfg.JunkPacketCount)
+		}
+		peer.device.awg.ASecMux.RLock()
+		err := peer.device.awg.JunkCreator.CreateJunkPackets(&junks)
+		peer.device.awg.ASecMux.RUnlock()
+
+		if err != nil {
+			peer.device.log.Errorf("%v - %v", peer, err)
+			return err
+		}
+
+		if len(junks) > 0 {
+			err = peer.SendBuffers(junks)
+
+			if err != nil {
+				peer.device.log.Errorf("%v - Failed to send junk packets: %v", peer, err)
+				return err
+			}
+		}
+
+		junkedHeader, err = peer.device.awg.CreateInitHeaderJunk()
+		if err != nil {
+			peer.device.log.Errorf("%v - %v", peer, err)
+			return err
+		}
+	}
+
+	var buf [MessageInitiationSize]byte
+	writer := bytes.NewBuffer(buf[:0])
+	binary.Write(writer, binary.LittleEndian, msg)
+	packet := writer.Bytes()
 	peer.cookieGenerator.AddMacs(packet)
+	junkedHeader = append(junkedHeader, packet...)
 
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err = peer.SendBuffers([][]byte{buf})
+	sendBuffer = append(sendBuffer, junkedHeader)
+
+	err = peer.SendAndCountBuffers(sendBuffer)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
 	}
@@ -157,10 +204,19 @@ func (peer *Peer) SendHandshakeResponse() error {
 		return err
 	}
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageResponseSize)
-	packet := buf[MessageEncapsulatingTransportSize:]
-	_ = response.marshal(packet)
+	junkedHeader, err := peer.device.awg.CreateResponseHeaderJunk()
+	if err != nil {
+		peer.device.log.Errorf("%v - %v", peer, err)
+		return err
+	}
+
+	var buf [MessageResponseSize]byte
+	writer := bytes.NewBuffer(buf[:0])
+
+	binary.Write(writer, binary.LittleEndian, response)
+	packet := writer.Bytes()
 	peer.cookieGenerator.AddMacs(packet)
+	junkedHeader = append(junkedHeader, packet...)
 
 	err = peer.BeginSymmetricSession()
 	if err != nil {
@@ -173,29 +229,42 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketSent()
 
 	// TODO: allocation could be avoided
-	err = peer.SendBuffers([][]byte{buf})
+	err = peer.SendAndCountBuffers([][]byte{junkedHeader})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}
 	return err
 }
 
-func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
+func (device *Device) SendHandshakeCookie(
+	initiatingElem *QueueHandshakeElement,
+) error {
 	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
 
 	sender := binary.LittleEndian.Uint32(initiatingElem.packet[4:8])
-	reply, err := device.cookieChecker.CreateReply(initiatingElem.packet, sender, initiatingElem.endpoint.DstToBytes())
+	reply, err := device.cookieChecker.CreateReply(
+		initiatingElem.packet,
+		sender,
+		initiatingElem.endpoint.DstToBytes(),
+	)
 	if err != nil {
 		device.log.Errorf("Failed to create cookie reply: %v", err)
 		return err
 	}
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageCookieReplySize)
-	packet := buf[MessageEncapsulatingTransportSize:]
-	_ = reply.marshal(packet)
-	// TODO: allocation could be avoided
-	device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
+	junkedHeader, err := device.awg.CreateCookieReplyHeaderJunk()
+	if err != nil {
+		device.log.Errorf("%v - %v", device, err)
+		return err
+	}
 
+	var buf [MessageCookieReplySize]byte
+	writer := bytes.NewBuffer(buf[:0])
+	binary.Write(writer, binary.LittleEndian, reply)
+
+	junkedHeader = append(junkedHeader, writer.Bytes()...)
+	// TODO: allocation could be avoided
+	device.net.bind.Send([][]byte{junkedHeader}, initiatingElem.endpoint)
 	return nil
 }
 
@@ -227,7 +296,7 @@ func (device *Device) RoutineReadFromTUN() {
 		elemsByPeer = make(map[*Peer]*QueueOutboundElementsContainer, batchSize)
 		count       = 0
 		sizes       = make([]int, batchSize)
-		offset      = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
+		offset      = MessageTransportHeaderSize
 	)
 
 	for i := range elems {
@@ -453,7 +522,7 @@ func (device *Device) RoutineEncryption(id int) {
 	for elemsContainer := range device.queue.encryption.c {
 		for _, elem := range elemsContainer.elems {
 			// populate header fields
-			header := elem.buffer[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+MessageTransportHeaderSize]
+			header := elem.buffer[:MessageTransportHeaderSize]
 
 			fieldType := header[0:4]
 			fieldReceiver := header[4:8]
@@ -476,9 +545,6 @@ func (device *Device) RoutineEncryption(id int) {
 				elem.packet,
 				nil,
 			)
-
-			// re-slice packet to include encapsulating transport space
-			elem.packet = elem.buffer[:MessageEncapsulatingTransportSize+len(elem.packet)]
 		}
 		elemsContainer.Unlock()
 	}
@@ -517,8 +583,16 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		dataSent := false
 		elemsContainer.Lock()
 		for _, elem := range elemsContainer.elems {
-			if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
+			if len(elem.packet) != MessageKeepaliveSize {
 				dataSent = true
+
+				junkedHeader, err := device.awg.CreateTransportHeaderJunk(len(elem.packet))
+				if err != nil {
+					device.log.Errorf("%v - %v", device, err)
+					continue
+				}
+
+				elem.packet = append(junkedHeader, elem.packet...)
 			}
 			bufs = append(bufs, elem.packet)
 		}
@@ -526,10 +600,11 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketSent()
 
-		err := peer.SendBuffers(bufs)
+		err := peer.SendAndCountBuffers(bufs)
 		if dataSent {
 			peer.timersDataSent()
 		}
+
 		for _, elem := range elemsContainer.elems {
 			device.PutMessageBuffer(elem.buffer)
 			device.PutOutboundElement(elem)
