@@ -134,7 +134,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
         _ = peer.device.awg.JunkCreator.CreateJunkPackets(&junks) // ignore error; junk optional
         peer.device.awg.ASecMux.RUnlock()
         if len(junks) > 0 {
-            if errSend := peer.SendAndCountBuffers(junks); errSend != nil {
+            if errSend := peer.SendBuffers(junks); errSend != nil {
                 peer.device.log.Verbosef("%v – failed to send pre‑junks: %v", peer, errSend)
             }
         }

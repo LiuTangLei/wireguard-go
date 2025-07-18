@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LiuTangLei/wireguard-go/conn"
+	"github.com/LiuTangLei/wireguard-go/device/awg"
 )
 
 type Peer struct {
@@ -113,9 +114,16 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	return peer, nil
 }
 
-// SendBuffers sends buffers to peer. WireGuard packet data in each element of
-// buffers must be preceded by MessageEncapsulatingTransportSize number of
-// bytes.
+func (peer *Peer) SendAndCountBuffers(buffers [][]byte) error {
+	err := peer.SendBuffers(buffers)
+	if err == nil {
+		awg.PacketCounter.Add(uint64(len(buffers)))
+		return nil
+	}
+
+	return err
+}
+
 func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
