@@ -23,7 +23,7 @@ type aSecCfgType struct {
 	InitPacketMagicHeader      uint32
 	ResponsePacketMagicHeader  uint32
 	UnderloadPacketMagicHeader uint32
-	TransportPacketMagicHeader uint32
+	TransportPacketMagicHeader uint64
 	// InitPacketMagicHeader      Limit
 	// ResponsePacketMagicHeader  Limit
 	// UnderloadPacketMagicHeader Limit
