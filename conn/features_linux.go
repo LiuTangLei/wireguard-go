@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package conn
@@ -24,16 +24,16 @@ func supportsUDPOffload(conn *net.UDPConn) (txOffload, rxOffload bool) {
 		return
 	}
 	err = rc.Control(func(fd uintptr) {
-		_, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, socketOptionUDPSegment)
-		if errSyscall != nil {
+		if _, e := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, socketOptionUDPSegment); e == nil {
+			txOffload = true
+		}
+		if opt, e := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, socketOptionUDPGRO); e == nil {
+			rxOffload = opt == 1
 			return
 		}
-		txOffload = true
-		opt, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, socketOptionUDPGRO)
-		if errSyscall != nil {
-			return
+		if e := unix.SetsockoptInt(int(fd), unix.IPPROTO_UDP, socketOptionUDPGRO, 1); e == nil {
+			rxOffload = true
 		}
-		rxOffload = opt == 1
 	})
 	if err != nil {
 		return false, false
