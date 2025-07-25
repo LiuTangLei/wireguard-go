@@ -1,5 +1,4 @@
-//go:build amnezia_unused
-// +build amnezia_unused
+//go:build linux
 
 /* SPDX-License-Identifier: MIT
  *

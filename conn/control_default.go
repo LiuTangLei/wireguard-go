@@ -49,3 +49,6 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 const controlSize = 0
 
 const StdNetSupportsStickySockets = false
+
+// --- amneziawg compatibility ---
+const stickyControlSize = controlSize

@@ -157,3 +157,6 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 var controlSize = unix.CmsgSpace(unix.SizeofInet6Pktinfo) + unix.CmsgSpace(sizeOfGSOData)
 
 const StdNetSupportsStickySockets = true
+
+// --- amneziawg compatibility ---
+var stickyControlSize = unix.CmsgSpace(unix.SizeofInet6Pktinfo)

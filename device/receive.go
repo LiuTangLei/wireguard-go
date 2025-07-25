@@ -138,42 +138,43 @@ func (device *Device) RoutineReceiveIncoming(
 			// check size of packet
 			packet := bufsArrs[i][:size]
 			var msgType uint32
-			if device.isAWG() {
-				// TODO:
-				// if awg.WaitResponse.ShouldWait.IsSet() {
-				// 	awg.WaitResponse.Channel <- struct{}{}
-				// }
-
-				if assumedMsgType, ok := packetSizeToMsgType[size]; ok {
-					junkSize := msgTypeToJunkSize[assumedMsgType]
-					// transport size can align with other header types;
-					// making sure we have the right msgType
-					msgType = binary.LittleEndian.Uint32(packet[junkSize : junkSize+4])
-					if msgType == assumedMsgType {
-						packet = packet[junkSize:]
-					} else {
-						device.log.Verbosef("transport packet lined up with another msg type")
-						msgType = binary.LittleEndian.Uint32(packet[:4])
-					}
-				} else {
-					transportJunkSize := device.awg.ASecCfg.TransportHeaderJunkSize
-					msgType = binary.LittleEndian.Uint32(packet[transportJunkSize : transportJunkSize+4])
-					if msgType != MessageTransportType {
-						// probably a junk packet
-						device.log.Verbosef("aSec: Received message with unknown type: %d", msgType)
-						continue
-					}
-
-					// remove junk from bufsArrs by shifting the packet
-					// this buffer is also used for decryption, so it needs to be corrected
-					copy(bufsArrs[i][:size], packet[transportJunkSize:])
-					size -= transportJunkSize
-					// need to reinitialize packet as well
-					packet = packet[:size]
-				}
-			} else {
-				msgType = binary.LittleEndian.Uint32(packet[:4])
-			}
+            if device.isAWG() {
+               if assumed, ok := packetSizeToMsgType[size]; ok {
+                   js := msgTypeToJunkSize[assumed]
+                   if size < js+4 { // bounds check
+                       device.log.Verbosef("aSec: packet too small for junk+type, drop")
+                       continue
+                   }
+                   msgType = binary.LittleEndian.Uint32(packet[js : js+4])
+                   if msgType == assumed {
+                       // strip junk in-place
+                       copy(bufsArrs[i][:size-js], packet[js:size])
+                       size -= js
+                       packet = bufsArrs[i][:size]
+                   } else {
+                       msgType = binary.LittleEndian.Uint32(packet[:4])
+                   }
+               } else {
+                   js := device.awg.ASecCfg.TransportHeaderJunkSize
+                   if size < js+4 {
+                       device.log.Verbosef("aSec: packet too small for junk+type, drop")
+                       continue
+                   }
+                   msgType = binary.LittleEndian.Uint32(packet[js : js+4])
+                   if msgType != MessageTransportType &&
+                       msgType != MessageInitiationType &&
+                       msgType != MessageResponseType &&
+                       msgType != MessageCookieReplyType {
+                       device.log.Verbosef("aSec: unknown msg type %d, drop", msgType)
+                       continue
+                   }
+                   copy(bufsArrs[i][:size-js], packet[js:size])
+                   size -= js
+                   packet = bufsArrs[i][:size]
+               }
+           } else {
+               msgType = binary.LittleEndian.Uint32(packet[:4])
+           }
 
 			switch msgType {
 

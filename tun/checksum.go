@@ -8,6 +8,140 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
+// ---- amneziawg compatibility helpers ----
+func nativeU64(b []byte) uint64 {
+	if cpu.IsBigEndian {
+		return binary.BigEndian.Uint64(b)
+	}
+	return binary.LittleEndian.Uint64(b)
+}
+
+func nativeU32(b []byte) uint32 {
+	if cpu.IsBigEndian {
+		return binary.BigEndian.Uint32(b)
+	}
+	return binary.LittleEndian.Uint32(b)
+}
+
+func nativeU16(b []byte) uint16 {
+	if cpu.IsBigEndian {
+		return binary.BigEndian.Uint16(b)
+	}
+	return binary.LittleEndian.Uint16(b)
+}
+
+func putNativeU64(dst []byte, v uint64) {
+	if cpu.IsBigEndian {
+		binary.BigEndian.PutUint64(dst, v)
+	} else {
+		binary.LittleEndian.PutUint64(dst, v)
+	}
+}
+// checksumNoFold64 is amneziawg's version (ported from amneziawg-go).
+func checksumNoFold64(b []byte, initial uint64) uint64 {
+	tmp := make([]byte, 8)
+	putNativeU64(tmp, initial)
+	ac := binary.BigEndian.Uint64(tmp) // amnezia 先转成 BE
+
+	var carry uint64
+	for len(b) >= 128 {
+		ac, carry = bits.Add64(ac, nativeU64(b[:8]), 0)
+		ac, carry = bits.Add64(ac, nativeU64(b[8:16]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[16:24]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[24:32]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[32:40]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[40:48]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[48:56]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[56:64]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[64:72]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[72:80]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[80:88]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[88:96]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[96:104]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[104:112]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[112:120]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[120:128]), carry)
+		ac += carry
+		b = b[128:]
+	}
+	if len(b) >= 64 {
+		ac, carry = bits.Add64(ac, nativeU64(b[:8]), 0)
+		ac, carry = bits.Add64(ac, nativeU64(b[8:16]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[16:24]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[24:32]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[32:40]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[40:48]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[48:56]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[56:64]), carry)
+		ac += carry
+		b = b[64:]
+	}
+	if len(b) >= 32 {
+		ac, carry = bits.Add64(ac, nativeU64(b[:8]), 0)
+		ac, carry = bits.Add64(ac, nativeU64(b[8:16]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[16:24]), carry)
+		ac, carry = bits.Add64(ac, nativeU64(b[24:32]), carry)
+		ac += carry
+		b = b[32:]
+	}
+	if len(b) >= 16 {
+		ac, carry = bits.Add64(ac, nativeU64(b[:8]), 0)
+		ac, carry = bits.Add64(ac, nativeU64(b[8:16]), carry)
+		ac += carry
+		b = b[16:]
+	}
+	if len(b) >= 8 {
+		ac, carry = bits.Add64(ac, nativeU64(b[:8]), 0)
+		ac += carry
+		b = b[8:]
+	}
+	if len(b) >= 4 {
+		ac, carry = bits.Add64(ac, uint64(nativeU32(b[:4])), 0)
+		ac += carry
+		b = b[4:]
+	}
+	if len(b) >= 2 {
+		ac, carry = bits.Add64(ac, uint64(nativeU16(b[:2])), 0)
+		ac += carry
+		b = b[2:]
+	}
+	if len(b) == 1 {
+		var tmp16 uint16
+		if cpu.IsBigEndian {
+			tmp16 = uint16(b[0]) << 8
+		} else {
+			tmp16 = uint16(b[0])
+		}
+		ac, carry = bits.Add64(ac, uint64(tmp16), 0)
+		ac += carry
+	}
+
+	putNativeU64(tmp, ac)
+	return binary.BigEndian.Uint64(tmp)
+}
+
+func checksumFoldFromNoFold(ac uint64) uint16 {
+	ac = (ac >> 16) + (ac & 0xffff)
+	ac = (ac >> 16) + (ac & 0xffff)
+	ac = (ac >> 16) + (ac & 0xffff)
+	ac = (ac >> 16) + (ac & 0xffff)
+	return uint16(ac)
+}
+
+func checksumAmnezia(b []byte, initial uint64) uint16 {
+	return checksumFoldFromNoFold(checksumNoFold64(b, initial))
+}
+
+func pseudoHeaderChecksumNoFold64(protocol uint8, srcAddr, dstAddr []byte, totalLen uint16) uint64 {
+	sum := checksumNoFold64(srcAddr, 0)
+	sum = checksumNoFold64(dstAddr, sum)
+	sum = checksumNoFold64([]byte{0, protocol}, sum)
+	tmp := make([]byte, 2)
+	binary.BigEndian.PutUint16(tmp, totalLen)
+	return checksumNoFold64(tmp, sum)
+}
+
+
 // checksumGeneric64 is a reference implementation of checksum using 64 bit
 // arithmetic for use in testing or when an architecture-specific implementation
 // is not available.

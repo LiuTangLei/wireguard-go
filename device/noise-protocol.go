@@ -58,14 +58,14 @@ const (
 	DefaultMessageInitiationType  uint32 = 1
 	DefaultMessageResponseType    uint32 = 2
 	DefaultMessageCookieReplyType uint32 = 3
-	DefaultMessageTransportType   uint64 = 4
+	DefaultMessageTransportType   uint32 = 4
 )
 
 var (
 	MessageInitiationType  uint32 = DefaultMessageInitiationType
 	MessageResponseType    uint32 = DefaultMessageResponseType
 	MessageCookieReplyType uint32 = DefaultMessageCookieReplyType
-	MessageTransportType   uint64 = DefaultMessageTransportType
+	MessageTransportType   uint32 = DefaultMessageTransportType
 )
 
 const (
