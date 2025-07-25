@@ -17,14 +17,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const tcpFlagsOffset = 13
-
-const (
-	tcpFlagFIN uint8 = 0x01
-	tcpFlagPSH uint8 = 0x08
-	tcpFlagACK uint8 = 0x10
-)
-
 // virtioNetHdr is defined in the kernel in include/uapi/linux/virtio_net.h. The
 // kernel symbol is virtio_net_hdr.
 type virtioNetHdr struct {
@@ -535,9 +527,7 @@ const (
 )
 
 const (
-	ipv4SrcAddrOffset = 12
-	ipv6SrcAddrOffset = 8
-	maxUint16         = 1<<16 - 1
+	maxUint16 = 1<<16 - 1
 )
 
 type groResult int
