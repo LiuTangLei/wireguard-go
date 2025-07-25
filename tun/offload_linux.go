@@ -910,12 +910,3 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 	return errors.Join(errTCP, errUDP)
 }
 
-func gsoNoneChecksum(in []byte, cSumStart, cSumOffset uint16) error {
-	cSumAt := cSumStart + cSumOffset
-	// The initial value at the checksum offset should be summed with the
-	// checksum we compute. This is typically the pseudo-header checksum.
-	initial := binary.BigEndian.Uint16(in[cSumAt:])
-	in[cSumAt], in[cSumAt+1] = 0, 0
-	binary.BigEndian.PutUint16(in[cSumAt:], ^checksum(in[cSumStart:], uint64(initial)))
-	return nil
-}
