@@ -320,7 +320,7 @@ func (device *Device) createMessageInitiation(peer *Peer, awg *awgConfig) (*Mess
 		handshake.chainKey[:],
 		ss[:],
 	)
-	aead, _ := chacha20poly1305.New(key[:])
+	aead, _ := chacha20poly1305New(key[:])
 	aead.Seal(msg.Static[:0], ZeroNonce[:], device.staticIdentity.publicKey[:], handshake.hash[:])
 	handshake.mixHash(msg.Static[:])
 
@@ -335,7 +335,7 @@ func (device *Device) createMessageInitiation(peer *Peer, awg *awgConfig) (*Mess
 		handshake.precomputedStaticStatic[:],
 	)
 	timestamp := tai64n.Now()
-	aead, _ = chacha20poly1305.New(key[:])
+	aead, _ = chacha20poly1305New(key[:])
 	aead.Seal(msg.Timestamp[:0], ZeroNonce[:], timestamp[:], handshake.hash[:])
 
 	// assign index
@@ -381,7 +381,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 		return nil
 	}
 	KDF2(&chainKey, &key, chainKey[:], ss[:])
-	aead, _ := chacha20poly1305.New(key[:])
+	aead, _ := chacha20poly1305New(key[:])
 	_, err = aead.Open(peerPK[:0], ZeroNonce[:], msg.Static[:], hash[:])
 	if err != nil {
 		return nil
@@ -418,7 +418,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 		chainKey[:],
 		handshake.precomputedStaticStatic[:],
 	)
-	aead, _ = chacha20poly1305.New(key[:])
+	aead, _ = chacha20poly1305New(key[:])
 	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
 	if err != nil {
 		handshake.mutex.RUnlock()
@@ -528,7 +528,7 @@ func (device *Device) createMessageResponse(peer *Peer, awg *awgConfig) (*Messag
 
 	handshake.mixHash(tau[:])
 
-	aead, _ := chacha20poly1305.New(key[:])
+	aead, _ := chacha20poly1305New(key[:])
 	aead.Seal(msg.Empty[:0], ZeroNonce[:], nil, handshake.hash[:])
 	handshake.mixHash(msg.Empty[:])
 
@@ -607,7 +607,7 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 
 		// authenticate transcript
 
-		aead, _ := chacha20poly1305.New(key[:])
+		aead, _ := chacha20poly1305New(key[:])
 		_, err = aead.Open(nil, ZeroNonce[:], msg.Empty[:], hash[:])
 		if err != nil {
 			return false
