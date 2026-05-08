@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -55,39 +55,35 @@ const (
 )
 
 const (
-	DefaultMessageInitiationType  uint32 = 1
-	DefaultMessageResponseType    uint32 = 2
-	DefaultMessageCookieReplyType uint32 = 3
-	DefaultMessageTransportType   uint32 = 4
-)
-
-var (
-	MessageInitiationType  uint32 = DefaultMessageInitiationType
-	MessageResponseType    uint32 = DefaultMessageResponseType
-	MessageCookieReplyType uint32 = DefaultMessageCookieReplyType
-	MessageTransportType   uint32 = DefaultMessageTransportType
+	MessageUnknownType     uint32 = 0
+	MessageInitiationType         = 1
+	MessageResponseType           = 2
+	MessageCookieReplyType        = 3
+	MessageTransportType          = 4
 )
 
 const (
-	MessageInitiationSize      = 148                                           // size of handshake initiation message
-	MessageResponseSize        = 92                                            // size of response message
-	MessageCookieReplySize     = 64                                            // size of cookie reply message
-	MessageTransportHeaderSize = 16                                            // size of data preceding content in transport message
-	MessageEncapsulatingTransportSize = 8
-	MessageTransportSize       = MessageTransportHeaderSize + poly1305.TagSize // size of empty transport
-	MessageKeepaliveSize       = MessageTransportSize                          // size of keepalive
-	MessageHandshakeSize       = MessageInitiationSize                         // size of largest handshake related message
+	DefaultMessageInitiationType  = MessageInitiationType
+	DefaultMessageResponseType    = MessageResponseType
+	DefaultMessageCookieReplyType = MessageCookieReplyType
+	DefaultMessageTransportType   = MessageTransportType
+)
+
+const (
+	MessageInitiationSize             = 148                                           // size of handshake initiation message
+	MessageResponseSize               = 92                                            // size of response message
+	MessageCookieReplySize            = 64                                            // size of cookie reply message
+	MessageTransportHeaderSize        = 16                                            // size of data preceding content in transport message
+	MessageEncapsulatingTransportSize = 8                                             // size of optional, free (for use by conn.Bind.Send()) space preceding the transport header
+	MessageTransportSize              = MessageTransportHeaderSize + poly1305.TagSize // size of empty transport
+	MessageKeepaliveSize              = MessageTransportSize                          // size of keepalive
+	MessageHandshakeSize              = MessageInitiationSize                         // size of largest handshake related message
 )
 
 const (
 	MessageTransportOffsetReceiver = 4
 	MessageTransportOffsetCounter  = 8
 	MessageTransportOffsetContent  = 16
-)
-
-var (
-	packetSizeToMsgType map[int]uint32
-	msgTypeToJunkSize   map[uint32]int
 )
 
 /* Type is an 8-bit field, followed by 3 nul bytes,
@@ -231,7 +227,7 @@ type Handshake struct {
 	localEphemeral            NoisePrivateKey          // ephemeral secret key
 	localIndex                uint32                   // used to clear hash-table
 	remoteIndex               uint32                   // index for sending
-	remoteStatic              NoisePublicKey           // long term key
+	remoteStatic              NoisePublicKey           // long term key, never changes, can be accessed without mutex
 	remoteEphemeral           NoisePublicKey           // ephemeral public key
 	precomputedStaticStatic   [NoisePublicKeySize]byte // precomputed shared secret
 	lastTimestamp             tai64n.Timestamp
@@ -282,6 +278,10 @@ func init() {
 }
 
 func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, error) {
+	return device.createMessageInitiation(peer, device.getAWGConfig())
+}
+
+func (device *Device) createMessageInitiation(peer *Peer, awg *awgConfig) (*MessageInitiation, error) {
 	device.staticIdentity.RLock()
 	defer device.staticIdentity.RUnlock()
 
@@ -300,20 +300,8 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 
 	handshake.mixHash(handshake.remoteStatic[:])
 
-	msgType := DefaultMessageInitiationType
-	if device.isAWG() {
-		device.awg.Mux.RLock()
-		msgType, err = device.awg.GetMsgType(DefaultMessageInitiationType)
-		if err != nil {
-			device.awg.Mux.RUnlock()
-			return nil, fmt.Errorf("get message type: %w", err)
-		}
-
-		device.awg.Mux.RUnlock()
-	}
-
 	msg := MessageInitiation{
-		Type:      msgType,
+		Type:      awg.headers.init.Generate(),
 		Ephemeral: handshake.localEphemeral.publicKey(),
 	}
 
@@ -369,25 +357,26 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 		chainKey [blake2s.Size]byte
 	)
 
-	device.awg.Mux.RLock()
-
 	if msg.Type != MessageInitiationType {
-		device.awg.Mux.RUnlock()
 		return nil
 	}
-	device.awg.Mux.RUnlock()
 
+	// Snapshot staticIdentity so we don't hold the RLock across LookupPeer,
+	// which may call NewPeer (reentrant RLock deadlocks against a pending
+	// SetPrivateKey writer; see lock-ordering.md).
 	device.staticIdentity.RLock()
-	defer device.staticIdentity.RUnlock()
+	publicKey := device.staticIdentity.publicKey
+	privateKey := device.staticIdentity.privateKey
+	device.staticIdentity.RUnlock()
 
-	mixHash(&hash, &InitialHash, device.staticIdentity.publicKey[:])
+	mixHash(&hash, &InitialHash, publicKey[:])
 	mixHash(&hash, &hash, msg.Ephemeral[:])
 	mixKey(&chainKey, &InitialChainKey, msg.Ephemeral[:])
 
 	// decrypt static key
 	var peerPK NoisePublicKey
 	var key [chacha20poly1305.KeySize]byte
-	ss, err := device.staticIdentity.privateKey.sharedSecret(msg.Ephemeral)
+	ss, err := privateKey.sharedSecret(msg.Ephemeral)
 	if err != nil {
 		return nil
 	}
@@ -477,6 +466,10 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 }
 
 func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error) {
+	return device.createMessageResponse(peer, device.getAWGConfig())
+}
+
+func (device *Device) createMessageResponse(peer *Peer, awg *awgConfig) (*MessageResponse, error) {
 	handshake := &peer.handshake
 	handshake.mutex.Lock()
 	defer handshake.mutex.Unlock()
@@ -495,19 +488,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 	}
 
 	var msg MessageResponse
-	if device.isAWG() {
-		device.awg.Mux.RLock()
-		msg.Type, err = device.awg.GetMsgType(DefaultMessageResponseType)
-		if err != nil {
-			device.awg.Mux.RUnlock()
-			return nil, fmt.Errorf("get message type: %w", err)
-		}
-
-		device.awg.Mux.RUnlock()
-	} else {
-		msg.Type = DefaultMessageResponseType
-	}
-
+	msg.Type = awg.headers.response.Generate()
 	msg.Sender = handshake.localIndex
 	msg.Receiver = handshake.remoteIndex
 
@@ -557,13 +538,9 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 }
 
 func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
-	device.awg.Mux.RLock()
-
 	if msg.Type != MessageResponseType {
-		device.awg.Mux.RUnlock()
 		return nil
 	}
-	device.awg.Mux.RUnlock()
 
 	// lookup handshake by receiver
 
@@ -578,6 +555,14 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		chainKey [blake2s.Size]byte
 	)
 
+	// Snapshot the static private key before acquiring handshake.mutex so
+	// that handshake.mutex is never held while acquiring staticIdentity
+	// (which would invert the staticIdentity < handshake.mutex hierarchy;
+	// see lock-ordering.md).
+	device.staticIdentity.RLock()
+	privateKey := device.staticIdentity.privateKey
+	device.staticIdentity.RUnlock()
+
 	ok := func() bool {
 		// lock handshake state
 
@@ -587,11 +572,6 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		if handshake.state != handshakeInitiationCreated {
 			return false
 		}
-
-		// lock private key for reading
-
-		device.staticIdentity.RLock()
-		defer device.staticIdentity.RUnlock()
 
 		// finish 3-way DH
 
@@ -605,7 +585,7 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		mixKey(&chainKey, &chainKey, ss[:])
 		setZero(ss[:])
 
-		ss, err = device.staticIdentity.privateKey.sharedSecret(msg.Ephemeral)
+		ss, err = privateKey.sharedSecret(msg.Ephemeral)
 		if err != nil {
 			return false
 		}

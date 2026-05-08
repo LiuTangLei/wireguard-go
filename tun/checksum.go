@@ -37,6 +37,7 @@ func putNativeU64(dst []byte, v uint64) {
 		binary.LittleEndian.PutUint64(dst, v)
 	}
 }
+
 // checksumNoFold64 is amneziawg's version (ported from amneziawg-go).
 func checksumNoFold64(b []byte, initial uint64) uint64 {
 	tmp := make([]byte, 8)
@@ -140,7 +141,6 @@ func pseudoHeaderChecksumNoFold64(protocol uint8, srcAddr, dstAddr []byte, total
 	binary.BigEndian.PutUint16(tmp, totalLen)
 	return checksumNoFold64(tmp, sum)
 }
-
 
 // checksumGeneric64 is a reference implementation of checksum using 64 bit
 // arithmetic for use in testing or when an architecture-specific implementation

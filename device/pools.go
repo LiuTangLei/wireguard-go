@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -68,7 +68,6 @@ func (device *Device) PopulatePools() {
 
 func (device *Device) GetInboundElementsContainer() *QueueInboundElementsContainer {
 	c := device.pool.inboundElementsContainer.Get().(*QueueInboundElementsContainer)
-	c.Mutex = sync.Mutex{}
 	return c
 }
 
@@ -82,7 +81,6 @@ func (device *Device) PutInboundElementsContainer(c *QueueInboundElementsContain
 
 func (device *Device) GetOutboundElementsContainer() *QueueOutboundElementsContainer {
 	c := device.pool.outboundElementsContainer.Get().(*QueueOutboundElementsContainer)
-	c.Mutex = sync.Mutex{}
 	return c
 }
 
@@ -91,6 +89,7 @@ func (device *Device) PutOutboundElementsContainer(c *QueueOutboundElementsConta
 		c.elems[i] = nil
 	}
 	c.elems = c.elems[:0]
+	c.awg = nil
 	device.pool.outboundElementsContainer.Put(c)
 }
 

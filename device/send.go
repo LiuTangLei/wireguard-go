@@ -1,14 +1,18 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"time"
@@ -45,16 +49,26 @@ import (
  */
 
 type QueueOutboundElement struct {
-	buffer  *[MaxMessageSize]byte // slice holding the packet data
-	packet  []byte                // slice of "buffer" (always!)
-	nonce   uint64                // nonce for encryption
-	keypair *Keypair              // keypair for encryption
-	peer    *Peer                 // related peer
+	buffer *[MaxMessageSize]byte // slice holding the packet data
+	// packet is always a slice of "buffer". The starting offset in buffer
+	// is either:
+	//  a) MessageEncapsulatingTransportSize+MessageTransportHeaderSize (plaintext)
+	//  b) 0 (post-encryption)
+	packet  []byte
+	nonce   uint64   // nonce for encryption
+	keypair *Keypair // keypair for encryption
+	peer    *Peer    // related peer
 }
 
 type QueueOutboundElementsContainer struct {
-	sync.Mutex
-	elems []*QueueOutboundElement
+	// filling is a one-shot barrier signaling encryption→send handoff.
+	// SendStagedPackets calls Add(1) before sending the container down
+	// the encryption and outbound queues; RoutineEncryption calls Done
+	// after encrypting; RoutineSequentialSender calls Wait before
+	// reading the encrypted packets.
+	filling sync.WaitGroup
+	elems   []*QueueOutboundElement
+	awg     *awgConfig
 }
 
 func (device *Device) NewOutboundElement() *QueueOutboundElement {
@@ -117,61 +131,50 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	peer.device.log.Verbosef("%v - Sending handshake initiation", peer)
 
-	msg, err := peer.device.CreateMessageInitiation(peer)
+	awg := peer.device.getAWGConfig()
+	msg, err := peer.device.createMessageInitiation(peer, awg)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to create initiation message: %v", peer, err)
 		return err
 	}
 
-	// Send pre-handshake junk packets if awg is enabled
-	if peer.device.isAWG() {
-		var junks [][]byte
-		if peer.device.version == VersionAwgSpecialHandshake {
-			peer.device.awg.Mux.RLock()
-			junks = peer.device.awg.HandshakeHandler.GenerateSpecialJunk()
-			peer.device.awg.Mux.RUnlock()
-			if junks != nil {
-				peer.device.log.Verbosef("%v - Special junks sent", peer)
-			}
-		} else {
-			junks = make([][]byte, 0, peer.device.awg.Cfg.JunkPacketCount)
+	var sendBuffer [][]byte
+	for _, ipacket := range awg.ipackets {
+		if ipacket == nil {
+			continue
 		}
+		buf := make([]byte, MessageEncapsulatingTransportSize+ipacket.ObfuscatedLen(0))
+		ipacket.Obfuscate(buf[MessageEncapsulatingTransportSize:], nil)
+		sendBuffer = append(sendBuffer, buf)
+	}
 
-		peer.device.awg.Mux.RLock()
-		peer.device.awg.JunkCreator.CreateJunkPackets(&junks)
-		peer.device.awg.Mux.RUnlock()
-
-		if len(junks) > 0 {
-			// This uses SendBuffers with offset 0, as junk packets don't have the prefix
-			if err := peer.SendBuffers(junks); err != nil {
-				peer.device.log.Verbosef("%v - Failed to send junk packets: %v (continuing)", peer, err)
-			}
+	jc := awg.junk.count
+	jmin := awg.junk.min
+	jmax := awg.junk.max
+	if jc > 0 && jmax >= jmin {
+		for range jc {
+			nBig, _ := rand.Int(rand.Reader, big.NewInt(int64(jmax-jmin+1)))
+			n := int(nBig.Int64()) + jmin
+			buf := make([]byte, MessageEncapsulatingTransportSize+n)
+			rand.Read(buf[MessageEncapsulatingTransportSize:])
+			sendBuffer = append(sendBuffer, buf)
 		}
 	}
 
-	// Create buffer with Tailscale's encapsulating transport size prefix
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageInitiationSize)
-	packet := buf[MessageEncapsulatingTransportSize:]
-
-	msg.marshal(packet)
+	padding := awg.paddings.init
+	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageInitiationSize)
+	if padding > 0 {
+		rand.Read(buf[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
+	}
+	packet := buf[MessageEncapsulatingTransportSize+padding:]
+	_ = msg.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
-
-	// Prepend awg junk header to the entire buffer (including the prefix)
-	sendPacket := buf
-	if peer.device.isAWG() {
-		junkedHeader, err := peer.device.awg.CreateInitHeaderJunk()
-		if err != nil {
-			peer.device.log.Verbosef("%v - CreateInitHeaderJunk failed: %v (continuing without junk)", peer, err)
-		} else {
-			sendPacket = append(junkedHeader, buf...)
-		}
-	}
+	sendBuffer = append(sendBuffer, buf)
 
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	// The peer.SendBuffers method will correctly use the encapsulating offset
-	err = peer.SendAndCountBuffers([][]byte{sendPacket})
+	err = peer.SendBuffers(sendBuffer)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
 	}
@@ -187,28 +190,21 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 	peer.device.log.Verbosef("%v - Sending handshake response", peer)
 
-	response, err := peer.device.CreateMessageResponse(peer)
+	awg := peer.device.getAWGConfig()
+	response, err := peer.device.createMessageResponse(peer, awg)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to create response message: %v", peer, err)
 		return err
 	}
 
-	// Create buffer with Tailscale's encapsulating transport size prefix
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageResponseSize)
-	packet := buf[MessageEncapsulatingTransportSize:]
-	response.marshal(packet)
-	peer.cookieGenerator.AddMacs(packet)
-
-	// Prepend awg junk header to the entire buffer (including the prefix)
-	sendPacket := buf
-	if peer.device.isAWG() {
-		junkedHeader, err := peer.device.awg.CreateResponseHeaderJunk()
-		if err != nil {
-			peer.device.log.Verbosef("%v - CreateResponseHeaderJunk failed: %v (continuing without junk)", peer, err)
-		} else {
-			sendPacket = append(junkedHeader, buf...)
-		}
+	padding := awg.paddings.response
+	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageResponseSize)
+	if padding > 0 {
+		rand.Read(buf[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
 	}
+	packet := buf[MessageEncapsulatingTransportSize+padding:]
+	_ = response.marshal(packet)
+	peer.cookieGenerator.AddMacs(packet)
 
 	err = peer.BeginSymmetricSession()
 	if err != nil {
@@ -220,7 +216,8 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err = peer.SendAndCountBuffers([][]byte{sendPacket})
+	// TODO: allocation could be avoided
+	err = peer.SendBuffers([][]byte{buf})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}
@@ -229,42 +226,29 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
 	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
+	awg := device.getAWGConfig()
 
 	sender := binary.LittleEndian.Uint32(initiatingElem.packet[4:8])
-
-	msgType := DefaultMessageCookieReplyType
-	if device.isAWG() {
-		device.awg.Mux.RLock()
-		if mt, err := device.awg.GetMsgType(DefaultMessageCookieReplyType); err == nil {
-			msgType = mt
-		}
-		device.awg.Mux.RUnlock()
-	}
-
-	reply, err := device.cookieChecker.CreateReply(initiatingElem.packet, sender, initiatingElem.endpoint.DstToBytes(), msgType)
+	reply, err := device.cookieChecker.CreateReply(
+		initiatingElem.packet,
+		sender,
+		initiatingElem.endpoint.DstToBytes(),
+		awg.headers.cookie.Generate(),
+	)
 	if err != nil {
 		device.log.Errorf("Failed to create cookie reply: %v", err)
 		return err
 	}
 
-	// Create buffer with Tailscale's encapsulating transport size prefix
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageCookieReplySize)
-	packet := buf[MessageEncapsulatingTransportSize:]
-	reply.marshal(packet)
-
-	// Prepend awg junk header to the entire buffer (including the prefix)
-	sendPacket := buf
-	if device.isAWG() {
-		junkedHeader, err := device.awg.CreateCookieReplyHeaderJunk()
-		if err != nil {
-			device.log.Verbosef("CreateCookieReplyHeaderJunk failed: %v (continuing without junk)", err)
-		} else {
-			sendPacket = append(junkedHeader, buf...)
-		}
+	padding := awg.paddings.cookie
+	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageCookieReplySize)
+	if padding > 0 {
+		rand.Read(buf[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
 	}
-
-	// The underlying Send must apply the necessary offset.
-	device.net.bind.Send([][]byte{sendPacket}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
+	packet := buf[MessageEncapsulatingTransportSize+padding:]
+	_ = reply.marshal(packet)
+	// TODO: allocation could be avoided
+	device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
 
 	return nil
 }
@@ -332,15 +316,17 @@ func (device *Device) RoutineReadFromTUN() {
 				if len(elem.packet) < ipv4.HeaderLen {
 					continue
 				}
-				dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
-				peer = device.allowedips.Lookup(dst)
+				src := netip.AddrFrom4([4]byte(elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]))
+				dst := netip.AddrFrom4([4]byte(elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]))
+				peer = device.allowedips.LookupFromPacket(src, dst, elem.packet)
 
 			case 6:
 				if len(elem.packet) < ipv6.HeaderLen {
 					continue
 				}
-				dst := elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
-				peer = device.allowedips.Lookup(dst)
+				src := netip.AddrFrom16([16]byte(elem.packet[IPv6offsetSrc : IPv6offsetSrc+net.IPv6len]))
+				dst := netip.AddrFrom16([16]byte(elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]))
+				peer = device.allowedips.LookupFromPacket(src, dst, elem.packet)
 
 			default:
 				device.log.Verbosef("Received packet with unknown IP version")
@@ -445,7 +431,6 @@ top:
 
 				elem.keypair = keypair
 			}
-			elemsContainer.Lock()
 			elemsContainer.elems = elemsContainer.elems[:i]
 
 			if elemsContainerOOO != nil {
@@ -459,6 +444,8 @@ top:
 
 			// add to parallel and sequential queue
 			if peer.isRunning.Load() {
+				elemsContainer.awg = peer.device.getAWGConfig()
+				elemsContainer.filling.Add(1)
 				peer.queue.outbound.c <- elemsContainer
 				peer.device.queue.encryption.c <- elemsContainer
 			} else {
@@ -521,6 +508,10 @@ func (device *Device) RoutineEncryption(id int) {
 	device.log.Verbosef("Routine: encryption worker %d - started", id)
 
 	for elemsContainer := range device.queue.encryption.c {
+		awg := elemsContainer.awg
+		if awg == nil {
+			awg = device.getAWGConfig()
+		}
 		for _, elem := range elemsContainer.elems {
 			// populate header fields
 			header := elem.buffer[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+MessageTransportHeaderSize]
@@ -529,16 +520,7 @@ func (device *Device) RoutineEncryption(id int) {
 			fieldReceiver := header[4:8]
 			fieldNonce := header[8:16]
 
-			msgType := DefaultMessageTransportType
-			if device.isAWG() {
-				device.awg.Mux.RLock()
-				if mt, err := device.awg.GetMsgType(DefaultMessageTransportType); err == nil {
-					msgType = mt
-				}
-				device.awg.Mux.RUnlock()
-			}
-
-			binary.LittleEndian.PutUint32(fieldType, msgType)
+			binary.LittleEndian.PutUint32(fieldType, awg.headers.transport.Generate())
 			binary.LittleEndian.PutUint32(fieldReceiver, elem.keypair.remoteIndex)
 			binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
@@ -559,7 +541,7 @@ func (device *Device) RoutineEncryption(id int) {
 			// re-slice packet to include encapsulating transport space
 			elem.packet = elem.buffer[:MessageEncapsulatingTransportSize+len(elem.packet)]
 		}
-		elemsContainer.Unlock()
+		elemsContainer.filling.Done()
 	}
 }
 
@@ -574,79 +556,95 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	bufs := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.outbound.c {
-		bufs = bufs[:0]
 		if elemsContainer == nil {
 			return
 		}
-		if !peer.isRunning.Load() {
-			// peer has been stopped; return re-usable elems to the shared pool.
-			// This is an optimization only. It is possible for the peer to be stopped
-			// immediately after this check, in which case, elem will get processed.
-			// The timers and SendBuffers code are resilient to a few stragglers.
-			// TODO: rework peer shutdown order to ensure
-			// that we never accidentally keep timers alive longer than necessary.
-			elemsContainer.Lock()
-			for _, elem := range elemsContainer.elems {
-				device.PutMessageBuffer(elem.buffer)
-				device.PutOutboundElement(elem)
-			}
-			device.PutOutboundElementsContainer(elemsContainer)
-			continue
-		}
-		dataSent := false
-		elemsContainer.Lock()
-		for _, elem := range elemsContainer.elems {
-			if elem.packet == nil {
-				continue
-			}
+		peer.processOutboundContainer(elemsContainer, bufs[:0])
+	}
+}
 
-			// The actual WireGuard packet starts after the prefix
-			wgPacket := elem.packet[MessageEncapsulatingTransportSize:]
+// processOutboundContainer waits for the encryption routine to finish
+// filling elemsContainer, then sends the batch (or drops it, if the peer
+// has been stopped) and returns the container to the pool.
+//
+// scratch is a length-0 slice used to assemble the per-packet buffers
+// passed to SendBuffers; its backing array is reused across calls.
+func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElementsContainer, scratch [][]byte) {
+	// Invariants from RoutineSequentialSender; all should be unreachable.
+	if len(scratch) != 0 || cap(scratch) == 0 {
+		panic(fmt.Sprintf("processOutboundContainer: scratch must be empty with non-zero cap; got len=%d cap=%d",
+			len(scratch), cap(scratch)))
+	}
+	if cap(scratch) < len(elemsContainer.elems) {
+		panic(fmt.Sprintf("processOutboundContainer: scratch cap %d < elems %d",
+			cap(scratch), len(elemsContainer.elems)))
+	}
 
-			// A keepalive packet has an empty payload. Check its encrypted size.
-			isKeepalive := len(wgPacket) == MessageTransportHeaderSize + chacha20poly1305.Overhead
+	device := peer.device
+	defer device.PutOutboundElementsContainer(elemsContainer)
 
-			sendPacket := elem.packet
-			if !isKeepalive && device.isAWG() {
-				dataSent = true
-				junkedHeader, err := device.awg.CreateTransportHeaderJunk(len(wgPacket))
-				if err != nil {
-					device.log.Errorf("%v - %v", device, err)
-					continue
-				}
-				// Prepend junk to the entire buffer, including the Tailscale prefix
-				sendPacket = append(junkedHeader, elem.packet...)
-			} else if !isKeepalive {
-				dataSent = true
-			}
-			bufs = append(bufs, sendPacket)
-		}
+	// Wait for RoutineEncryption to finish filling the container. After
+	// Wait returns we have happens-before with that goroutine and are the
+	// sole owner of the container until Put hands it back to the pool.
+	elemsContainer.filling.Wait()
 
-		peer.timersAnyAuthenticatedPacketTraversal()
-		peer.timersAnyAuthenticatedPacketSent()
-
-		err := peer.SendAndCountBuffers(bufs)
-		if dataSent {
-			peer.timersDataSent()
-		}
-
+	if !peer.isRunning.Load() {
+		// peer has been stopped; return re-usable elems to the shared pool.
+		// This is an optimization only. It is possible for the peer to be stopped
+		// immediately after this check, in which case, elem will get processed.
+		// The timers and SendBuffers code are resilient to a few stragglers.
+		// TODO: rework peer shutdown order to ensure
+		// that we never accidentally keep timers alive longer than necessary.
 		for _, elem := range elemsContainer.elems {
 			device.PutMessageBuffer(elem.buffer)
 			device.PutOutboundElement(elem)
 		}
-		device.PutOutboundElementsContainer(elemsContainer)
-		if err != nil {
-			var errGSO conn.ErrUDPGSODisabled
-			if errors.As(err, &errGSO) {
-				device.log.Verbosef(err.Error())
-				err = errGSO.RetryErr
+		return
+	}
+
+	dataSent := false
+	awg := elemsContainer.awg
+	if awg == nil {
+		awg = device.getAWGConfig()
+	}
+	for _, elem := range elemsContainer.elems {
+		wgPacketLen := len(elem.packet[MessageEncapsulatingTransportSize:])
+		if wgPacketLen != MessageKeepaliveSize {
+			dataSent = true
+			if padding := awg.paddings.transport; padding > 0 {
+				copy(
+					elem.buffer[MessageEncapsulatingTransportSize+padding:],
+					elem.buffer[MessageEncapsulatingTransportSize:MessageEncapsulatingTransportSize+wgPacketLen],
+				)
+				rand.Read(elem.buffer[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
+				elem.packet = elem.buffer[:MessageEncapsulatingTransportSize+padding+wgPacketLen]
 			}
 		}
-		if err != nil {
-			device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
-			continue
-		}
-
-		peer.keepKeyFreshSending()
+		scratch = append(scratch, elem.packet)
 	}
+
+	peer.timersAnyAuthenticatedPacketTraversal()
+	peer.timersAnyAuthenticatedPacketSent()
+
+	err := peer.SendBuffers(scratch)
+	if dataSent {
+		peer.timersDataSent()
+	}
+	for _, elem := range elemsContainer.elems {
+		device.PutMessageBuffer(elem.buffer)
+		device.PutOutboundElement(elem)
+	}
+	if err != nil {
+		var errGSO conn.ErrUDPGSODisabled
+		if errors.As(err, &errGSO) {
+			device.log.Verbosef(err.Error())
+			err = errGSO.RetryErr
+		}
+	}
+	if err != nil {
+		device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
+		return
+	}
+
+	peer.keepKeyFreshSending()
 }

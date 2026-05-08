@@ -909,4 +909,3 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 	errUDP := applyUDPCoalesceAccounting(bufs, offset, udpTable)
 	return errors.Join(errTCP, errUDP)
 }
-

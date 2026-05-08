@@ -224,7 +224,6 @@ func TestTwoDevicePing(t *testing.T) {
 	})
 }
 
-// Run test with -race=false to avoid the race for setting the default msgTypes 2 times
 func TestAWGDevicePing(t *testing.T) {
 	goroutineLeakCheck(t)
 
@@ -522,7 +521,7 @@ func (b *fakeBindSized) Close() error { return nil }
 
 func (b *fakeBindSized) SetMark(mark uint32) error { return nil }
 
-func (b *fakeBindSized) Send(bufs [][]byte, ep conn.Endpoint) error { return nil }
+func (b *fakeBindSized) Send(bufs [][]byte, ep conn.Endpoint, offset int) error { return nil }
 
 func (b *fakeBindSized) ParseEndpoint(s string) (conn.Endpoint, error) { return nil, nil }
 

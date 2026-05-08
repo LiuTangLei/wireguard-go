@@ -1,61 +1,23 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
-	"encoding/binary"
 	"errors"
-	"fmt"
+	"net/netip"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/LiuTangLei/wireguard-go/conn"
-	"github.com/LiuTangLei/wireguard-go/device/awg"
-	"github.com/LiuTangLei/wireguard-go/ipc"
 	"github.com/LiuTangLei/wireguard-go/ratelimiter"
 	"github.com/LiuTangLei/wireguard-go/rwcancel"
 	"github.com/LiuTangLei/wireguard-go/tun"
 )
-
-type Version uint8
-
-const (
-	VersionDefault Version = iota
-	VersionAwg
-	VersionAwgSpecialHandshake
-)
-
-// TODO:
-type AtomicVersion struct {
-	value atomic.Uint32
-}
-
-func NewAtomicVersion(v Version) *AtomicVersion {
-	av := &AtomicVersion{}
-	av.Store(v)
-	return av
-}
-
-func (av *AtomicVersion) Load() Version {
-	return Version(av.value.Load())
-}
-
-func (av *AtomicVersion) Store(v Version) {
-	av.value.Store(uint32(v))
-}
-
-func (av *AtomicVersion) CompareAndSwap(old, new Version) bool {
-	return av.value.CompareAndSwap(uint32(old), uint32(new))
-}
-
-func (av *AtomicVersion) Swap(new Version) Version {
-	return Version(av.value.Swap(uint32(new)))
-}
 
 type Device struct {
 	state struct {
@@ -96,6 +58,7 @@ type Device struct {
 	peers struct {
 		sync.RWMutex // protects keyMap
 		keyMap       map[NoisePublicKey]*Peer
+		lookupFunc   PeerLookupFunc // or nil if unused
 	}
 
 	rate struct {
@@ -130,8 +93,7 @@ type Device struct {
 	closed   chan struct{}
 	log      *Logger
 
-	version Version
-	awg     awg.Protocol
+	awg atomic.Pointer[awgConfig]
 }
 
 // deviceState represents the state of a Device.
@@ -205,8 +167,7 @@ func (device *Device) changeState(want deviceState) (err error) {
 			err = errDown
 		}
 	}
-	device.log.Verbosef(
-		"Interface state was %s, requested %s, now %s", old, want, device.deviceState())
+	device.log.Verbosef("Interface state was %s, requested %s, now %s", old, want, device.deviceState())
 	return
 }
 
@@ -223,14 +184,22 @@ func (device *Device) upLocked() error {
 	device.ipcMutex.Lock()
 	defer device.ipcMutex.Unlock()
 
+	// Collect peers under RLock and then release before calling into them,
+	// because SendKeepalive can reach CreateMessageInitiation which acquires
+	// staticIdentity.RLock; holding peers.RLock across that path would
+	// invert the staticIdentity < peers hierarchy (see lock-ordering.md).
 	device.peers.RLock()
+	peers := make([]*Peer, 0, len(device.peers.keyMap))
 	for _, peer := range device.peers.keyMap {
+		peers = append(peers, peer)
+	}
+	device.peers.RUnlock()
+	for _, peer := range peers {
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}
-	device.peers.RUnlock()
 	return nil
 }
 
@@ -341,6 +310,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
+	device.awg.Store(defaultAWGConfig.clone())
 
 	device.PopulatePools()
 
@@ -382,12 +352,65 @@ func (device *Device) BatchSize() int {
 	return size
 }
 
+// LookupPeer looks up a peer by its public key.
+//
+// If the peer does not exist and a [PeerLookupFunc] is set (via
+// [Device.SetPeerLookupFunc]), then that function is used to create the peer
+// before returning it. Peers created via this mechanism exist only until their
+// state machine reaches idle, and then the peers are removed.
+//
+// If the peer does not exist and no [PeerLookupFunc] is set, nil is returned.
+//
+// Use [Device.LookupActivePeer] to only return already-existing peers, without
+// using a [PeerLookupFunc].
 func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	device.peers.RLock()
-	defer device.peers.RUnlock()
+	p, ok := device.peers.keyMap[pk]
+	lookupFunc := device.peers.lookupFunc
+	device.peers.RUnlock()
+	if ok || lookupFunc == nil {
+		return p
+	}
 
-	return device.peers.keyMap[pk]
+	conf, ok := lookupFunc(pk)
+	if !ok || conf == nil {
+		return nil
+	}
+
+	p, err := device.NewPeer(pk)
+	if err != nil {
+		if errors.Is(err, errAddExistingPeer) {
+			device.peers.RLock()
+			defer device.peers.RUnlock()
+			return device.peers.keyMap[pk]
+		}
+		device.log.Errorf("Failed to create peer: %v", err)
+		return nil
+	}
+	p.SetAllowedIPs(conf.AllowedIPs)
+	p.deleteOnIdle = true
+	if conf.Endpoint != nil {
+		p.SetEndpointFromPacket(conf.Endpoint)
+	}
+	p.Start()
+	return p
 }
+
+// LookupActivePeer looks up a peer by its public key.
+//
+// Unlike [Device.LookupPeer], this function does not use a [PeerLookupFunc] to
+// create the peer if it does not already exist.
+//
+// If the peer does not exist or was created lazily via [PeerLookupFunc]
+// and has subsequently idled away, it returns (nil, false).
+func (device *Device) LookupActivePeer(pk NoisePublicKey) (_ *Peer, ok bool) {
+	device.peers.RLock()
+	defer device.peers.RUnlock()
+	p, ok := device.peers.keyMap[pk]
+	return p, ok
+}
+
+var errAddExistingPeer = errors.New("adding existing peer")
 
 func (device *Device) RemovePeer(key NoisePublicKey) {
 	device.peers.Lock()
@@ -409,6 +432,75 @@ func (device *Device) RemoveAllPeers() {
 	}
 
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
+}
+
+// RemoveMatchingPeers removes all peers for which shouldRemove returns true.
+//
+// It returns the number of peers removed.
+func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool) (numRemoved int) {
+	device.peers.Lock()
+	defer device.peers.Unlock()
+
+	for key, peer := range device.peers.keyMap {
+		if shouldRemove(key) {
+			removePeerLocked(device, peer, key)
+			numRemoved++
+		}
+	}
+	return numRemoved
+}
+
+// NewPeerConfig are the configuration parameters for a new peer created via a
+// [PeerLookupFunc] func.
+type NewPeerConfig struct {
+	// AllowedIPs is the initial set of allowed IPs for the new peer.
+	AllowedIPs []netip.Prefix
+
+	// Endpoint, if non-nil, sets the initial endpoint for newly
+	// created peers.
+	Endpoint conn.Endpoint
+}
+
+// PeerLookupFunc is the type of function used to look up peers by public key
+// when receiving packets for unknown peers.
+//
+// If it returns nil, the peer is not known.
+//
+// Otherwise, returning non-nil signals that wireguard-go should create the peer
+// with the provided allowed IPs.
+//
+// See [Device.SetPeerLookupFunc] and [Device.LookupPeer].
+type PeerLookupFunc func(NoisePublicKey) (_ *NewPeerConfig, ok bool)
+
+// PeerByIPPacketFunc is the type of function used to look up a peer to send to
+// for a given src/dst IP pair. The ipPkt parameter is the raw IP packet being
+// routed; callers needing transport-layer ports or other header fields may parse
+// them from ipPkt, but must handle IP fragmentation (ports may be absent on
+// non-first fragments) and protocols that do not use ports (e.g. ICMP).
+//
+// Except for experimental use cases, dst is the only address
+// that should be relied upon when looking up a peer.
+//
+// If it returns ok=false, the peer is not known.
+//
+// See [Device.SetPeerByIPPacketFunc] and [Device.SetPeerLookupFunc].
+type PeerByIPPacketFunc func(src, dst netip.Addr, ipPkt []byte) (_ NoisePublicKey, ok bool)
+
+// SetPeerLookupFunc sets the function used to look up peers by public key
+// when receiving packets for unknown peers.
+func (device *Device) SetPeerLookupFunc(f PeerLookupFunc) {
+	device.peers.Lock()
+	defer device.peers.Unlock()
+	device.peers.lookupFunc = f
+}
+
+// SetPeerByIPPacketFunc sets the function used to look up peers by IP address
+// when sending packets to unknown peers.
+func (device *Device) SetPeerByIPPacketFunc(f PeerByIPPacketFunc) {
+	device.allowedips.mu.Lock()
+	defer device.allowedips.mu.Unlock()
+	device.allowedips.peerByIPPacketFunc = f
+	device.allowedips.device = device
 }
 
 func (device *Device) Close() {
@@ -439,8 +531,6 @@ func (device *Device) Close() {
 
 	device.rate.limiter.Close()
 
-	device.resetProtocol()
-
 	device.log.Verbosef("Device closed")
 	close(device.closed)
 }
@@ -454,16 +544,25 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 		return
 	}
 
+	// Collect the set of peers to keepalive under peers.RLock, then release
+	// before invoking SendKeepalive. SendKeepalive can reach
+	// CreateMessageInitiation which acquires staticIdentity.RLock; holding
+	// peers.RLock across that path would invert the
+	// staticIdentity < peers hierarchy (see lock-ordering.md).
+	var peers []*Peer
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.keypairs.RLock()
 		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
-			peer.SendKeepalive()
+			peers = append(peers, peer)
 		}
 	}
 	device.peers.RUnlock()
+	for _, peer := range peers {
+		peer.SendKeepalive()
+	}
 }
 
 // closeBindLocked closes the device's net.bind.
@@ -579,371 +678,4 @@ func (device *Device) BindClose() error {
 	err := closeBindLocked(device)
 	device.net.Unlock()
 	return err
-}
-
-func (device *Device) isAWG() bool {
-	return device.version >= VersionAwg
-}
-
-func (device *Device) resetProtocol() {
-	// restore default message type values
-	MessageInitiationType = DefaultMessageInitiationType
-	MessageResponseType = DefaultMessageResponseType
-	MessageCookieReplyType = DefaultMessageCookieReplyType
-	MessageTransportType = DefaultMessageTransportType
-}
-
-func (device *Device) handlePostConfig(tempAwg *awg.Protocol) error {
-	if !tempAwg.Cfg.IsSet && !tempAwg.HandshakeHandler.IsSet {
-		return nil
-	}
-
-	var errs []error
-
-	isAwgOn := false
-	device.awg.Mux.Lock()
-	if tempAwg.Cfg.JunkPacketCount < 0 {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			"JunkPacketCount should be non negative",
-		),
-		)
-	}
-	device.awg.Cfg.JunkPacketCount = tempAwg.Cfg.JunkPacketCount
-	if tempAwg.Cfg.JunkPacketCount != 0 {
-		isAwgOn = true
-	}
-
-	device.awg.Cfg.JunkPacketMinSize = tempAwg.Cfg.JunkPacketMinSize
-	if tempAwg.Cfg.JunkPacketMinSize != 0 {
-		isAwgOn = true
-	}
-
-	if device.awg.Cfg.JunkPacketCount > 0 &&
-		tempAwg.Cfg.JunkPacketMaxSize == tempAwg.Cfg.JunkPacketMinSize {
-
-		tempAwg.Cfg.JunkPacketMaxSize++ // to make rand gen work
-	}
-
-	if tempAwg.Cfg.JunkPacketMaxSize >= MaxSegmentSize {
-		device.awg.Cfg.JunkPacketMinSize = 0
-		device.awg.Cfg.JunkPacketMaxSize = 1
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			"JunkPacketMaxSize: %d; should be smaller than maxSegmentSize: %d",
-			tempAwg.Cfg.JunkPacketMaxSize,
-			MaxSegmentSize,
-		))
-	} else if tempAwg.Cfg.JunkPacketMaxSize < tempAwg.Cfg.JunkPacketMinSize {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			"maxSize: %d; should be greater than minSize: %d",
-			tempAwg.Cfg.JunkPacketMaxSize,
-			tempAwg.Cfg.JunkPacketMinSize,
-		))
-	} else {
-		device.awg.Cfg.JunkPacketMaxSize = tempAwg.Cfg.JunkPacketMaxSize
-	}
-
-	if tempAwg.Cfg.JunkPacketMaxSize != 0 {
-		isAwgOn = true
-	}
-
-	magicHeaders := make([]awg.MagicHeader, 4)
-
-	if len(tempAwg.Cfg.MagicHeaders.Values) != 4 {
-		return ipcErrorf(
-			ipc.IpcErrorInvalid,
-			"magic headers should have 4 values; got: %d",
-			len(tempAwg.Cfg.MagicHeaders.Values),
-		)
-	}
-
-	if tempAwg.Cfg.MagicHeaders.Values[0].Min > 4 {
-		isAwgOn = true
-		device.log.Verbosef("UAPI: Updating init_packet_magic_header")
-		magicHeaders[0] = tempAwg.Cfg.MagicHeaders.Values[0]
-
-		MessageInitiationType = magicHeaders[0].Min
-	} else {
-		device.log.Verbosef("UAPI: Using default init type")
-		MessageInitiationType = DefaultMessageInitiationType
-		magicHeaders[0] = awg.NewMagicHeaderSameValue(DefaultMessageInitiationType)
-	}
-
-	if tempAwg.Cfg.MagicHeaders.Values[1].Min > 4 {
-		isAwgOn = true
-
-		device.log.Verbosef("UAPI: Updating response_packet_magic_header")
-		magicHeaders[1] = tempAwg.Cfg.MagicHeaders.Values[1]
-		MessageResponseType = magicHeaders[1].Min
-	} else {
-		device.log.Verbosef("UAPI: Using default response type")
-		MessageResponseType = DefaultMessageResponseType
-		magicHeaders[1] = awg.NewMagicHeaderSameValue(DefaultMessageResponseType)
-	}
-
-	if tempAwg.Cfg.MagicHeaders.Values[2].Min > 4 {
-		isAwgOn = true
-
-		device.log.Verbosef("UAPI: Updating underload_packet_magic_header")
-		magicHeaders[2] = tempAwg.Cfg.MagicHeaders.Values[2]
-		MessageCookieReplyType = magicHeaders[2].Min
-	} else {
-		device.log.Verbosef("UAPI: Using default underload type")
-		MessageCookieReplyType = DefaultMessageCookieReplyType
-		magicHeaders[2] = awg.NewMagicHeaderSameValue(DefaultMessageCookieReplyType)
-	}
-
-	if tempAwg.Cfg.MagicHeaders.Values[3].Min > 4 {
-		isAwgOn = true
-
-		device.log.Verbosef("UAPI: Updating transport_packet_magic_header")
-		magicHeaders[3] = tempAwg.Cfg.MagicHeaders.Values[3]
-		MessageTransportType = magicHeaders[3].Min
-	} else {
-		device.log.Verbosef("UAPI: Using default transport type")
-		MessageTransportType = DefaultMessageTransportType
-		magicHeaders[3] = awg.NewMagicHeaderSameValue(DefaultMessageTransportType)
-	}
-
-	var err error
-	device.awg.Cfg.MagicHeaders, err = awg.NewMagicHeaders(magicHeaders)
-	if err != nil {
-		errs = append(errs, ipcErrorf(ipc.IpcErrorInvalid, "new magic headers: %w", err))
-	}
-
-	isSameHeaderMap := map[uint32]struct{}{
-		MessageInitiationType:  {},
-		MessageResponseType:    {},
-		MessageCookieReplyType: {},
-		MessageTransportType:   {},
-	}
-
-	// size will be different if same values
-	if len(isSameHeaderMap) != 4 {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			`magic headers should differ; got: init:%d; recv:%d; unde:%d; tran:%d`,
-			MessageInitiationType,
-			MessageResponseType,
-			MessageCookieReplyType,
-			MessageTransportType,
-		),
-		)
-	}
-
-	newInitSize := MessageInitiationSize + tempAwg.Cfg.InitHeaderJunkSize
-
-	if newInitSize >= MaxSegmentSize {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			`init header size(148) + junkSize:%d; should be smaller than maxSegmentSize: %d`,
-			tempAwg.Cfg.InitHeaderJunkSize,
-			MaxSegmentSize,
-		),
-		)
-	} else {
-		device.awg.Cfg.InitHeaderJunkSize = tempAwg.Cfg.InitHeaderJunkSize
-	}
-
-	if tempAwg.Cfg.InitHeaderJunkSize != 0 {
-		isAwgOn = true
-	}
-
-	newResponseSize := MessageResponseSize + tempAwg.Cfg.ResponseHeaderJunkSize
-
-	if newResponseSize >= MaxSegmentSize {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			`response header size(92) + junkSize:%d; should be smaller than maxSegmentSize: %d`,
-			tempAwg.Cfg.ResponseHeaderJunkSize,
-			MaxSegmentSize,
-		),
-		)
-	} else {
-		device.awg.Cfg.ResponseHeaderJunkSize = tempAwg.Cfg.ResponseHeaderJunkSize
-	}
-
-	if tempAwg.Cfg.ResponseHeaderJunkSize != 0 {
-		isAwgOn = true
-	}
-
-	newCookieSize := MessageCookieReplySize + tempAwg.Cfg.CookieReplyHeaderJunkSize
-
-	if newCookieSize >= MaxSegmentSize {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			`cookie reply size(92) + junkSize:%d; should be smaller than maxSegmentSize: %d`,
-			tempAwg.Cfg.CookieReplyHeaderJunkSize,
-			MaxSegmentSize,
-		),
-		)
-	} else {
-		device.awg.Cfg.CookieReplyHeaderJunkSize = tempAwg.Cfg.CookieReplyHeaderJunkSize
-	}
-
-	if tempAwg.Cfg.CookieReplyHeaderJunkSize != 0 {
-		isAwgOn = true
-	}
-
-	newTransportSize := MessageTransportSize + tempAwg.Cfg.TransportHeaderJunkSize
-
-	if newTransportSize >= MaxSegmentSize {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			`transport size(92) + junkSize:%d; should be smaller than maxSegmentSize: %d`,
-			tempAwg.Cfg.TransportHeaderJunkSize,
-			MaxSegmentSize,
-		),
-		)
-	} else {
-		device.awg.Cfg.TransportHeaderJunkSize = tempAwg.Cfg.TransportHeaderJunkSize
-	}
-
-	if tempAwg.Cfg.TransportHeaderJunkSize != 0 {
-		isAwgOn = true
-	}
-
-	isSameSizeMap := map[int]struct{}{
-		newInitSize:      {},
-		newResponseSize:  {},
-		newCookieSize:    {},
-		newTransportSize: {},
-	}
-
-	if len(isSameSizeMap) != 4 {
-		errs = append(errs, ipcErrorf(
-			ipc.IpcErrorInvalid,
-			`new sizes should differ; init: %d; response: %d; cookie: %d; trans: %d`,
-			newInitSize,
-			newResponseSize,
-			newCookieSize,
-			newTransportSize,
-		),
-		)
-	} else {
-		msgTypeToJunkSize = map[uint32]int{
-			MessageInitiationType:  device.awg.Cfg.InitHeaderJunkSize,
-			MessageResponseType:    device.awg.Cfg.ResponseHeaderJunkSize,
-			MessageCookieReplyType: device.awg.Cfg.CookieReplyHeaderJunkSize,
-			MessageTransportType:   device.awg.Cfg.TransportHeaderJunkSize,
-		}
-
-		packetSizeToMsgType = map[int]uint32{
-			newInitSize:      MessageInitiationType,
-			newResponseSize:  MessageResponseType,
-			newCookieSize:    MessageCookieReplyType,
-			newTransportSize: MessageTransportType,
-		}
-	}
-
-	device.awg.IsOn.SetTo(isAwgOn)
-	device.awg.JunkCreator = awg.NewJunkCreator(device.awg.Cfg)
-
-	if tempAwg.HandshakeHandler.IsSet {
-		if err := tempAwg.HandshakeHandler.Validate(); err != nil {
-			errs = append(errs, ipcErrorf(
-				ipc.IpcErrorInvalid, "handshake handler validate: %w", err))
-		} else {
-			device.awg.HandshakeHandler = tempAwg.HandshakeHandler
-			device.awg.HandshakeHandler.SpecialJunk.DefaultJunkCount = tempAwg.Cfg.JunkPacketCount
-			device.version = VersionAwgSpecialHandshake
-		}
-	} else {
-		device.version = VersionAwg
-	}
-
-	device.awg.Mux.Unlock()
-
-	return errors.Join(errs...)
-}
-
-func (device *Device) ProcessAWGPacket(size int, packet *[]byte, buffer *[MaxMessageSize]byte) (uint32, error) {
-	// TODO:
-	// if awg.WaitResponse.ShouldWait.IsSet() {
-	// 	awg.WaitResponse.Channel <- struct{}{}
-	// }
-
-	expectedMsgType, isKnownSize := packetSizeToMsgType[size]
-	if !isKnownSize {
-		msgType, err := device.handleTransport(size, packet, buffer)
-
-		if err != nil {
-			return 0, fmt.Errorf("handle transport: %w", err)
-		}
-
-		return msgType, nil
-	}
-
-	junkSize := msgTypeToJunkSize[expectedMsgType]
-
-    if size < junkSize+4 {
-        return 0, fmt.Errorf("packet too small for junk+type (%d < %d)", size, junkSize+4)
-    }
-
-	// transport size can align with other header types;
-	// making sure we have the right actualMsgType
-	actualMsgType, err := device.getMsgType(packet, junkSize)
-	if err != nil {
-		return 0, fmt.Errorf("get msg type: %w", err)
-	}
-
-	if actualMsgType == expectedMsgType {
-		*packet = (*packet)[junkSize:]
-		return actualMsgType, nil
-	}
-
-	device.log.Verbosef("awg: transport packet lined up with another msg type")
-
-	msgType, err := device.handleTransport(size, packet, buffer)
-	if err != nil {
-		return 0, fmt.Errorf("handle transport: %w", err)
-	}
-
-	return msgType, nil
-}
-
-func (device *Device) getMsgType(packet *[]byte, junkSize int) (uint32, error) {
-    if len(*packet) < junkSize+4 {
-        return 0, fmt.Errorf("packet too small to read msg type")
-    }
-
-	msgTypeValue := binary.LittleEndian.Uint32((*packet)[junkSize : junkSize+4])
-	msgType, err := device.awg.GetMagicHeaderMinFor(msgTypeValue)
-
-	if err != nil {
-		return 0, fmt.Errorf("get magic header min: %w", err)
-	}
-
-	return msgType, nil
-}
-
-func (device *Device) handleTransport(size int, packet *[]byte, buffer *[MaxMessageSize]byte) (uint32, error) {
-	junkSize := device.awg.Cfg.TransportHeaderJunkSize
-
-    if size < junkSize+4 {
-        return 0, fmt.Errorf("packet too small for transport junk+type (%d < %d)", size, junkSize+4)
-    }
-
-	msgType, err := device.getMsgType(packet, junkSize)
-	if err != nil {
-		return 0, fmt.Errorf("get msg type: %w", err)
-	}
-
-	if msgType != MessageTransportType {
-		// probably a junk packet
-		return 0, fmt.Errorf("Received message with unknown type: %d", msgType)
-	}
-
-	if junkSize > 0 {
-		// remove junk from buffer by shifting the packet
-		// this buffer is also used for decryption, so it needs to be corrected
-		copy((*buffer)[:size], (*packet)[junkSize:])
-		size -= junkSize
-		// need to reinitialize packet as well
-		(*packet) = (*packet)[:size]
-	}
-
-	return msgType, nil
 }
