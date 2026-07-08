@@ -611,14 +611,14 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 		wgPacketLen := len(elem.packet[MessageEncapsulatingTransportSize:])
 		if wgPacketLen != MessageKeepaliveSize {
 			dataSent = true
-			if padding := awg.paddings.transport; padding > 0 {
-				copy(
-					elem.buffer[MessageEncapsulatingTransportSize+padding:],
-					elem.buffer[MessageEncapsulatingTransportSize:MessageEncapsulatingTransportSize+wgPacketLen],
-				)
-				rand.Read(elem.buffer[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
-				elem.packet = elem.buffer[:MessageEncapsulatingTransportSize+padding+wgPacketLen]
-			}
+		}
+		if padding := awg.paddings.transport; padding > 0 {
+			copy(
+				elem.buffer[MessageEncapsulatingTransportSize+padding:],
+				elem.buffer[MessageEncapsulatingTransportSize:MessageEncapsulatingTransportSize+wgPacketLen],
+			)
+			rand.Read(elem.buffer[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
+			elem.packet = elem.buffer[:MessageEncapsulatingTransportSize+padding+wgPacketLen]
 		}
 		scratch = append(scratch, elem.packet)
 	}

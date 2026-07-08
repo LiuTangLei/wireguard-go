@@ -380,9 +380,6 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 
-			// update endpoint
-			peer.SetEndpointFromPacket(elem.endpoint)
-
 			device.log.Verbosef("%v - Received handshake initiation", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
@@ -407,9 +404,6 @@ func (device *Device) RoutineHandshake(id int) {
 				device.log.Verbosef("Received invalid response message from %s", elem.endpoint.DstToString())
 				goto skip
 			}
-
-			// update endpoint
-			peer.SetEndpointFromPacket(elem.endpoint)
 
 			device.log.Verbosef("%v - Received handshake response", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
@@ -496,7 +490,6 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 
 		validTailPacket = i
 		if peer.ReceivedWithKeypair(elem.keypair) {
-			peer.SetEndpointFromPacket(elem.endpoint)
 			peer.timersHandshakeComplete()
 			peer.SendStagedPackets()
 		}
@@ -557,7 +550,6 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 
 	peer.rxBytes.Add(rxBytesLen)
 	if validTailPacket >= 0 {
-		peer.SetEndpointFromPacket(elems[validTailPacket].endpoint)
 		peer.keepKeyFreshReceiving()
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketReceived()
