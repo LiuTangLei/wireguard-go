@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/crypto/chacha20poly1305"
 
-	asmAEAD "github.com/tailscale/wireguard-go/tsasm/arm/chacha20poly1305"
+	asmAEAD "github.com/LiuTangLei/wireguard-go/tsasm/arm/chacha20poly1305"
 )
 
 // chacha20poly1305New returns a ChaCha20-Poly1305 AEAD. On GOARCH=arm

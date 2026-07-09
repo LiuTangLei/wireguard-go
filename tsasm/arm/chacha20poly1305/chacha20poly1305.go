@@ -15,8 +15,8 @@ import (
 	"encoding/binary"
 	"errors"
 
-	chacha "github.com/tailscale/wireguard-go/tsasm/arm/chacha20"
-	"github.com/tailscale/wireguard-go/tsasm/arm/poly1305"
+	chacha "github.com/LiuTangLei/wireguard-go/tsasm/arm/chacha20"
+	"github.com/LiuTangLei/wireguard-go/tsasm/arm/poly1305"
 )
 
 const (
