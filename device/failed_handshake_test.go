@@ -8,38 +8,65 @@ package device
 import (
 	"net/netip"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/LiuTangLei/wireguard-go/conn/bindtest"
+	"github.com/LiuTangLei/wireguard-go/tun/tuntest"
 )
 
-// TestLazyPeerArmsReapingTimer verifies that a peer lazily created via a
-// PeerLookupFunc (which never completes a handshake) still arms its
-// zeroKeyMaterial reaping timer in Start(). Without this, such a peer would
-// leak goroutines and buffers forever because the expiry timer is otherwise
-// only armed on a successful handshake.
-//
-// This intentionally avoids testing/synctest: the device's autodraining queues
-// (device/channels.go) attach GC finalizers to their channels, and a finalizer
-// running on the runtime's finalizer goroutine outside a synctest bubble would
-// fatally panic ("receive on synctest channel from outside bubble"). A real
-// (non-bubble) device exercises the same Start() code path safely.
-func TestLazyPeerArmsReapingTimer(t *testing.T) {
-	dev := newTestDevice(t)
-	dev.SetPeerLookupFunc(func(pk NoisePublicKey) (*NewPeerConfig, bool) {
-		ip := netip.AddrFrom4([4]byte{10, pk[0], pk[1], pk[2]})
-		return &NewPeerConfig{AllowedIPs: []netip.Prefix{netip.PrefixFrom(ip, 32)}}, true
+// newSynctestCapableDevice returns a [Device] that is safe to use within a
+// synctest bubble. It uses channel-based [conn.Bind]s instead of goroutines
+// performing "real" I/O, which can never durably block. The returned [Device]
+// is registered to Close() at tb.Cleanup time.
+func newSynctestCapableDevice(tb testing.TB) *Device {
+	tb.Helper()
+	sk, err := newPrivateKey()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	binds := bindtest.NewChannelBinds()
+	tun := tuntest.NewChannelTUN()
+	dev := NewDevice(tun.TUN(), binds[0], NewLogger(LogLevelError, ""))
+	dev.SetPrivateKey(sk)
+	tb.Cleanup(dev.Close)
+	return dev
+}
+
+func TestLazyPeerReaping(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dev := newSynctestCapableDevice(t)
+		dev.SetPeerLookupFunc(func(pk NoisePublicKey) (*NewPeerConfig, bool) {
+			ip := netip.AddrFrom4([4]byte{10, pk[0], pk[1], pk[2]})
+			return &NewPeerConfig{AllowedIPs: []netip.Prefix{netip.PrefixFrom(ip, 32)}}, true
+		})
+		var pk NoisePublicKey
+		pk[0] = 0x42
+
+		// LookupPeer creates the peer and calls Start(), which arms the
+		// reaping timer for a lazy peer that never completes a handshake.
+		peer := dev.LookupPeer(pk)
+		if peer == nil {
+			t.Fatal("LookupPeer returned nil")
+		}
+		synctest.Wait() // let startup goroutines settle to durable block
+
+		if !peer.timers.zeroKeyMaterial.IsPending() {
+			t.Fatal("zeroKeyMaterial not armed; lazy peer would never be reaped")
+		}
+
+		// The timer fires only at the deadline: still present just before.
+		time.Sleep(RejectAfterTime*3 - time.Second)
+		synctest.Wait()
+		if _, ok := dev.LookupActivePeer(pk); !ok {
+			t.Fatal("peer reaped before RejectAfterTime*3")
+		}
+
+		// Cross the deadline: expiredZeroKeyMaterial -> RemovePeer.
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if _, ok := dev.LookupActivePeer(pk); ok {
+			t.Fatal("peer NOT reaped after RejectAfterTime*3")
+		}
 	})
-
-	var pk NoisePublicKey
-	pk[0] = 0x42
-
-	// LookupPeer creates the peer and calls Start(), which arms the reaping
-	// timer for a lazy peer that never completes a handshake.
-	peer := dev.LookupPeer(pk)
-	if peer == nil {
-		t.Fatal("LookupPeer returned nil")
-	}
-	t.Cleanup(func() { dev.RemovePeer(pk) })
-
-	if !peer.timers.zeroKeyMaterial.IsPending() {
-		t.Fatal("zeroKeyMaterial not armed; lazy peer would never be reaped")
-	}
 }
