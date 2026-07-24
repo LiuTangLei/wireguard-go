@@ -127,26 +127,50 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			sendf("s4=%d", awg.paddings.transport)
 		}
 
-		if awg.headers.init != nil {
-			sendf("h1=%s", awg.headers.init.GenSpec())
+		if !awg.headers.init.IsZero() {
+			sendf("h1=%s", awg.headers.init.ToString())
 		}
 
-		if awg.headers.response != nil {
-			sendf("h2=%s", awg.headers.response.GenSpec())
+		if !awg.headers.response.IsZero() {
+			sendf("h2=%s", awg.headers.response.ToString())
 		}
 
-		if awg.headers.cookie != nil {
-			sendf("h3=%s", awg.headers.cookie.GenSpec())
+		if !awg.headers.cookie.IsZero() {
+			sendf("h3=%s", awg.headers.cookie.ToString())
 		}
 
-		if awg.headers.transport != nil {
-			sendf("h4=%s", awg.headers.transport.GenSpec())
+		if !awg.headers.transport.IsZero() {
+			sendf("h4=%s", awg.headers.transport.ToString())
 		}
 
 		for i, ipacket := range awg.ipackets {
 			if ipacket != nil {
 				sendf("i%d=%s", i+1, ipacket.Spec)
 			}
+		}
+
+		if !awg.headerProtectionKey.IsZero() {
+			keyf("header_protection_key", (*[32]byte)(&awg.headerProtectionKey))
+		}
+
+		if addition := device.contentPaddingAddition.Load(); !addition.IsZero() {
+			sendf("content_padding_addition=%s", addition.ToString())
+		}
+
+		if timing := device.timings.rekeyAfterTimeSec.Load(); !timing.IsZero() {
+			sendf("rekey_after_time=%s", timing.ToString())
+		}
+		if timing := device.timings.rekeyTimeoutSec.Load(); !timing.IsZero() {
+			sendf("rekey_timeout=%s", timing.ToString())
+		}
+		if timing := device.timings.rejectAfterTimeSec.Load(); !timing.IsZero() {
+			sendf("reject_after_time=%s", timing.ToString())
+		}
+		if timing := device.timings.keepaliveTimeoutSec.Load(); !timing.IsZero() {
+			sendf("keepalive_timeout=%s", timing.ToString())
+		}
+		if rang := device.timings.maxHandshakeAttemps.Load(); !rang.IsZero() {
+			sendf("max_handshake_attempts=%s", rang.ToString())
 		}
 
 		for _, peer := range device.peers.keyMap {
@@ -170,7 +194,10 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			sendf("last_handshake_time_nsec=%d", nano)
 			sendf("tx_bytes=%d", peer.txBytes.Load())
 			sendf("rx_bytes=%d", peer.rxBytes.Load())
-			sendf("persistent_keepalive_interval=%d", peer.persistentKeepaliveInterval.Load())
+
+			if keepalive := peer.persistentKeepaliveInterval.Load(); !keepalive.IsZero() {
+				sendf("persistent_keepalive_interval=%s", keepalive.ToString())
+			}
 
 			device.allowedips.EntriesForPeer(peer, func(prefix netip.Prefix) bool {
 				sendf("allowed_ip=%s", prefix.String())
@@ -310,109 +337,91 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 		device.RemoveAllPeers()
 
 	case "jc":
-		jc, err := strconv.Atoi(value)
+		jc, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jc: %w", err)
 		}
-		if jc <= 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "jc must be a positive value")
-		}
+
 		device.log.Verbosef("UAPI: Updating junk count")
-		ipcDev.awg.junk.count = jc
+		ipcDev.awg.junk.count = uint32(jc)
 
 	case "jmin":
-		jmin, err := strconv.Atoi(value)
+		jmin, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jmin: %w", err)
 		}
-		if jmin <= 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "jmin must be a positive value")
-		}
+
 		device.log.Verbosef("UAPI: Updating junk min")
-		ipcDev.awg.junk.min = jmin
+		ipcDev.awg.junk.min = uint32(jmin)
 
 	case "jmax":
-		jmax, err := strconv.Atoi(value)
+		jmax, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jmax: %w", err)
 		}
-		if jmax <= 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "jmax must be a positive value")
-		}
+
 		device.log.Verbosef("UAPI: Updating junk max")
-		ipcDev.awg.junk.max = jmax
+		ipcDev.awg.junk.max = uint32(jmax)
 
 	case "s1":
-		padding, err := strconv.Atoi(value)
+		padding, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse s1: %w", err)
 		}
-		if padding < 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "s1 must be non-negative")
-		}
 		device.log.Verbosef("UAPI: Updating s1 padding")
-		ipcDev.awg.paddings.init = padding
+		ipcDev.awg.paddings.init = uint32(padding)
 
 	case "s2":
-		padding, err := strconv.Atoi(value)
+		padding, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse s2: %w", err)
 		}
-		if padding < 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "s2 must be non-negative")
-		}
 		device.log.Verbosef("UAPI: Updating s2 padding")
-		ipcDev.awg.paddings.response = padding
+		ipcDev.awg.paddings.response = uint32(padding)
 
 	case "s3":
-		padding, err := strconv.Atoi(value)
+		padding, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse s3: %w", err)
 		}
-		if padding < 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "s3 must be non-negative")
-		}
 		device.log.Verbosef("UAPI: Updating s3 padding")
-		ipcDev.awg.paddings.cookie = padding
+		ipcDev.awg.paddings.cookie = uint32(padding)
 
 	case "s4":
-		padding, err := strconv.Atoi(value)
+		padding, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse s4: %w", err)
 		}
-		if padding < 0 {
-			return ipcErrorf(ipc.IpcErrorInvalid, "s4 must be non-negative")
-		}
 		device.log.Verbosef("UAPI: Updating s4 padding")
-		ipcDev.awg.paddings.transport = padding
+		ipcDev.awg.paddings.transport = uint32(padding)
 
 	case "h1":
-		header, err := newMagicHeader(value)
-		if err != nil {
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse H1: %w", err)
 		}
-		ipcDev.awg.headers.init = header
+		ipcDev.awg.headers.init = rang
 
 	case "h2":
-		header, err := newMagicHeader(value)
-		if err != nil {
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse H2: %w", err)
 		}
-		ipcDev.awg.headers.response = header
+		ipcDev.awg.headers.response = rang
 
 	case "h3":
-		header, err := newMagicHeader(value)
-		if err != nil {
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse H3: %w", err)
 		}
-		ipcDev.awg.headers.cookie = header
+		ipcDev.awg.headers.cookie = rang
 
 	case "h4":
-		header, err := newMagicHeader(value)
-		if err != nil {
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse H4: %w", err)
 		}
-		ipcDev.awg.headers.transport = header
+		ipcDev.awg.headers.transport = rang
 
 	case "i1":
 		chain, err := newObfChain(value)
@@ -448,6 +457,63 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse I5: %w", err)
 		}
 		ipcDev.awg.ipackets[4] = chain
+
+	case "header_protection_key":
+		var key HeaderCipherKey
+		err := key.FromHex(value)
+		if err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set header_protection_key: %w", err)
+		}
+		ipcDev.awg.headerProtectionKey = key
+
+	case "content_padding_addition":
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse content_padding_addition: %w", err)
+		}
+
+		device.log.Verbosef("UAPI: Updating content padding addition")
+		device.contentPaddingAddition.Store(rang)
+
+	case "rekey_after_time":
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse rekey after time: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating rekey after time")
+		device.timings.rekeyAfterTimeSec.Store(rang)
+
+	case "rekey_timeout":
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse rekey timeout: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating rekey timeout")
+		device.timings.rekeyTimeoutSec.Store(rang)
+
+	case "reject_after_time":
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse reject after time: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating reject after time")
+		device.timings.rejectAfterTimeSec.Store(rang)
+
+	case "keepalive_timeout":
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse keepalive timeout: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating keepalive timeout")
+		device.timings.keepaliveTimeoutSec.Store(rang)
+
+	case "max_handshake_attempts":
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse max handshake attempts: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating max handshake attempts")
+		device.timings.maxHandshakeAttemps.Store(rang)
 
 	default:
 		return ipcErrorf(ipc.IpcErrorInvalid, "invalid UAPI device key: %v", key)
@@ -566,19 +632,15 @@ func (device *Device) handlePeerLine(
 	case "persistent_keepalive_interval":
 		device.log.Verbosef("%v - UAPI: Updating persistent keepalive interval", peer.Peer)
 
-		secs, err := strconv.ParseUint(value, 10, 16)
-		if err != nil {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set persistent keepalive interval: %w",
-				err,
-			)
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set persistent keepalive interval: %w", err)
 		}
 
-		old := peer.persistentKeepaliveInterval.Swap(uint32(secs))
+		old := peer.persistentKeepaliveInterval.Swap(rang)
 
 		// Send immediate keepalive if we're turning it on and before it wasn't on.
-		peer.pkaOn = old == 0 && secs != 0
+		peer.pkaOn = old.IsZero() && !rang.IsZero()
 
 	case "replace_allowed_ips":
 		device.log.Verbosef("%v - UAPI: Removing all allowedips", peer.Peer)
@@ -703,6 +765,21 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 	if err := validateAWGHeaders(d.awg.headers); err != nil {
 		return err
 	}
+
+	if !d.awg.headerProtectionKey.IsZero() {
+		paddings := []uint32{
+			d.awg.paddings.init,
+			d.awg.paddings.response,
+			d.awg.paddings.cookie,
+			d.awg.paddings.transport,
+		}
+		for i, padding := range paddings {
+			if padding < HeaderCipherNonceSize {
+				return fmt.Errorf("S%d must be at least %d to use header protection", i+1, HeaderCipherNonceSize)
+			}
+		}
+	}
+
 	device.awg.Store(d.awg)
 
 	return nil

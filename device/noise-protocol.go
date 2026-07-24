@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/blake2s"
+	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/poly1305"
 
@@ -301,7 +302,7 @@ func (device *Device) createMessageInitiation(peer *Peer, awg *awgConfig) (*Mess
 	handshake.mixHash(handshake.remoteStatic[:])
 
 	msg := MessageInitiation{
-		Type:      awg.headers.init.Generate(),
+		Type:      awg.headers.init.PickOne(),
 		Ephemeral: handshake.localEphemeral.publicKey(),
 	}
 
@@ -488,7 +489,7 @@ func (device *Device) createMessageResponse(peer *Peer, awg *awgConfig) (*Messag
 	}
 
 	var msg MessageResponse
-	msg.Type = awg.headers.response.Generate()
+	msg.Type = awg.headers.response.PickOne()
 	msg.Sender = handshake.localIndex
 	msg.Receiver = handshake.remoteIndex
 
@@ -746,4 +747,12 @@ func (peer *Peer) ReceivedWithKeypair(receivedKeypair *Keypair) bool {
 	keypairs.current = keypairs.next.Load()
 	keypairs.next.Store(nil)
 	return true
+}
+
+func (cfg *awgConfig) HeaderProtectionCipher(salt []byte) (*chacha20.Cipher, error) {
+	if cfg.headerProtectionKey.IsZero() {
+		return nil, nil
+	}
+
+	return chacha20.NewUnauthenticatedCipher(cfg.headerProtectionKey[:], salt)
 }

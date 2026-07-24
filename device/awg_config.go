@@ -3,39 +3,46 @@ package device
 import "errors"
 
 type awgConfig struct {
-	junk     awgJunkConfig
-	headers  awgHeaderConfig
-	paddings awgPaddingConfig
-	ipackets [5]*obfChain
+	junk                awgJunkConfig
+	headers             awgHeaderConfig
+	paddings            awgPaddingConfig
+	ipackets            [5]*obfChain
+	headerProtectionKey HeaderCipherKey
 }
 
 type awgJunkConfig struct {
-	min   int
-	max   int
-	count int
+	min   uint32
+	max   uint32
+	count uint32
 }
 
 type awgHeaderConfig struct {
-	init      *magicHeader
-	cookie    *magicHeader
-	response  *magicHeader
-	transport *magicHeader
+	init      UintRange
+	cookie    UintRange
+	response  UintRange
+	transport UintRange
 }
 
 type awgPaddingConfig struct {
-	init      int
-	response  int
-	cookie    int
-	transport int
+	init      uint32
+	response  uint32
+	cookie    uint32
+	transport uint32
 }
 
 var defaultAWGConfig = &awgConfig{
 	headers: awgHeaderConfig{
-		init:      &magicHeader{start: MessageInitiationType, end: MessageInitiationType},
-		response:  &magicHeader{start: MessageResponseType, end: MessageResponseType},
-		cookie:    &magicHeader{start: MessageCookieReplyType, end: MessageCookieReplyType},
-		transport: &magicHeader{start: MessageTransportType, end: MessageTransportType},
+		init:      newUintRange(MessageInitiationType, MessageInitiationType),
+		response:  newUintRange(MessageResponseType, MessageResponseType),
+		cookie:    newUintRange(MessageCookieReplyType, MessageCookieReplyType),
+		transport: newUintRange(MessageTransportType, MessageTransportType),
 	},
+}
+
+func newUintRange(lo, hi uint32) UintRange {
+	var r UintRange
+	r.FromUint32(lo, hi)
+	return r
 }
 
 func (device *Device) getAWGConfig() *awgConfig {
@@ -52,12 +59,10 @@ func (cfg *awgConfig) clone() *awgConfig {
 }
 
 func validateAWGHeaders(headers awgHeaderConfig) error {
-	all := []*magicHeader{headers.init, headers.response, headers.cookie, headers.transport}
+	all := []UintRange{headers.init, headers.response, headers.cookie, headers.transport}
 	for i := 0; i < len(all); i++ {
 		for j := i + 1; j < len(all); j++ {
-			left := all[i]
-			right := all[j]
-			if left.start <= right.end && right.start <= left.end {
+			if all[i].Overlap(all[j]) {
 				return errors.New("headers must not overlap")
 			}
 		}

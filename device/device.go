@@ -96,6 +96,16 @@ type Device struct {
 	log      *Logger
 
 	awg atomic.Pointer[awgConfig]
+
+	contentPaddingAddition AtomicUintRange
+
+	timings struct {
+		rekeyAfterTimeSec   AtomicUintRange
+		rekeyTimeoutSec     AtomicUintRange
+		rejectAfterTimeSec  AtomicUintRange
+		keepaliveTimeoutSec AtomicUintRange
+		maxHandshakeAttemps AtomicUintRange
+	}
 }
 
 // deviceState represents the state of a Device.
@@ -198,7 +208,7 @@ func (device *Device) upLocked() error {
 	device.peers.RUnlock()
 	for _, peer := range peers {
 		peer.Start()
-		if peer.persistentKeepaliveInterval.Load() > 0 {
+		if !peer.persistentKeepaliveInterval.Load().IsZero() {
 			peer.SendKeepalive()
 		}
 	}
@@ -629,11 +639,12 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 	// CreateMessageInitiation which acquires staticIdentity.RLock; holding
 	// peers.RLock across that path would invert the
 	// staticIdentity < peers hierarchy (see lock-ordering.md).
+	timeout := device.keychainExpireTime()
 	var peers []*Peer
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.keypairs.RLock()
-		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
+		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(timeout).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
 			peers = append(peers, peer)
