@@ -55,11 +55,12 @@ type QueueOutboundElement struct {
 	// is either:
 	//  a) MessageEncapsulatingTransportSize+padding+MessageTransportHeaderSize (plaintext)
 	//  b) 0 (post-encryption)
-	packet  []byte
-	nonce   uint64   // nonce for encryption
-	keypair *Keypair // keypair for encryption
-	peer    *Peer    // related peer
-	padding uint32
+	packet      []byte
+	nonce       uint64   // nonce for encryption
+	keypair     *Keypair // keypair for encryption
+	peer        *Peer    // related peer
+	padding     uint32
+	isKeepalive bool
 }
 
 type QueueOutboundElementsContainer struct {
@@ -78,6 +79,7 @@ func (device *Device) NewOutboundElement() *QueueOutboundElement {
 	elem.buffer = device.GetMessageBuffer()
 	elem.nonce = 0
 	elem.padding = device.getAWGConfig().paddings.transport
+	elem.isKeepalive = false
 	// keypair and peer were cleared (if necessary) by clearPointers.
 	return elem
 }
@@ -91,6 +93,7 @@ func (elem *QueueOutboundElement) clearPointers() {
 	elem.packet = nil
 	elem.keypair = nil
 	elem.peer = nil
+	elem.isKeepalive = false
 }
 
 // SendKeepalive queues a keepalive if no packets are queued for
@@ -100,6 +103,7 @@ func (peer *Peer) SendKeepalive() {
 		awg := peer.device.getAWGConfig()
 		elem := peer.device.NewOutboundElement()
 		elem.padding = awg.paddings.transport
+		elem.isKeepalive = true
 		elemsContainer := peer.device.GetOutboundElementsContainer()
 		elemsContainer.awg = awg
 		elemsContainer.elems = append(elemsContainer.elems, elem)
@@ -713,7 +717,6 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	device.log.Verbosef("%v - Routine: sequential sender - started", peer)
 
 	bufs := make([][]byte, 0, maxBatchSize)
-
 	for elemsContainer := range peer.queue.outbound {
 		peer.processOutboundContainer(elemsContainer, bufs[:0])
 	}
@@ -763,9 +766,7 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 		if len(elem.packet) == 0 {
 			continue
 		}
-		packetStart := MessageEncapsulatingTransportSize + int(elem.padding)
-		wgPacketLen := len(elem.packet[packetStart:])
-		if wgPacketLen != MessageKeepaliveSize {
+		if !elem.isKeepalive {
 			dataSent = true
 		}
 		scratch = append(scratch, elem.packet)
