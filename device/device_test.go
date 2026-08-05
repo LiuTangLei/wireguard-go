@@ -328,6 +328,37 @@ func TestAWGDevicePing(t *testing.T) {
 	})
 }
 
+func TestAWG3DevicePing(t *testing.T) {
+	goroutineLeakCheck(t)
+
+	pair := genTestPair(t, true,
+		"jc", "5",
+		"jmin", "500",
+		"jmax", "1000",
+		"s1", "15",
+		"s2", "18",
+		"s3", "20",
+		"s4", "25",
+		"h1", "123456-123500",
+		"h2", "67543-67550",
+		"h3", "123123-123200",
+		"h4", "32345-32350",
+		"header_protection_key", "4242424242424242424242424242424242424242424242424242424242424242",
+		"content_padding_addition", "5-31",
+		"rekey_after_time", "120-180",
+		"rekey_timeout", "5-7",
+		"reject_after_time", "180-240",
+		"keepalive_timeout", "10-15",
+		"max_handshake_attempts", "8-12",
+	)
+	t.Run("ping 1.0.0.1", func(t *testing.T) {
+		pair.Send(t, Ping, nil)
+	})
+	t.Run("ping 1.0.0.2", func(t *testing.T) {
+		pair.Send(t, Pong, nil)
+	})
+}
+
 // Needs to be stopped with Ctrl-C
 func TestAWGHandshakeDevicePing(t *testing.T) {
 	t.Skip("This test is intended to be run manually, not as part of the test suite.")
