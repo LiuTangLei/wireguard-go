@@ -8,6 +8,8 @@ type awgConfig struct {
 	paddings            awgPaddingConfig
 	ipackets            [5]*obfChain
 	headerProtectionKey HeaderCipherKey
+	randomTrailers      bool
+	disableCookies      bool
 }
 
 type awgJunkConfig struct {

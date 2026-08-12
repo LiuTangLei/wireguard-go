@@ -209,7 +209,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	}
 	// handshakeOnUserSend is flipped false after lastSentHandshake checks,
 	// enabling eventual transmission at a future call of this method, while
-	// still honoring [RekeyTimeout].
+	// still honoring the configured minimum rekey timeout.
 	peer.handshakeOnUserSend.Store(false)
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
@@ -247,10 +247,12 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	}
 
 	padding := int(awg.paddings.init)
-	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageInitiationSize)
+	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize, awg), 0)
+	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageInitiationSize+trailerLen)
 	crypt := buf[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding]
 	rand.Read(crypt)
-	packet := buf[MessageEncapsulatingTransportSize+padding:]
+	messageStart := MessageEncapsulatingTransportSize + padding
+	packet := buf[messageStart : messageStart+MessageInitiationSize]
 	_ = msg.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
 	sendBuffer = append(sendBuffer, buf)
@@ -265,6 +267,9 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	if cip != nil {
 		cip.XORKeyStream(packet, packet)
 	}
+
+	trailer := buf[messageStart+MessageInitiationSize:]
+	rand.Read(trailer)
 	err = peer.SendBuffers(sendBuffer)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
@@ -289,10 +294,12 @@ func (peer *Peer) SendHandshakeResponse() error {
 	}
 
 	padding := int(awg.paddings.response)
-	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageResponseSize)
+	trailerLen := max(peer.randomTrailer(padding+MessageResponseSize, awg), 0)
+	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageResponseSize+trailerLen)
 	crypt := buf[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding]
 	rand.Read(crypt)
-	packet := buf[MessageEncapsulatingTransportSize+padding:]
+	messageStart := MessageEncapsulatingTransportSize + padding
+	packet := buf[messageStart : messageStart+MessageResponseSize]
 	_ = response.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
 
@@ -313,6 +320,9 @@ func (peer *Peer) SendHandshakeResponse() error {
 	if cip != nil {
 		cip.XORKeyStream(packet, packet)
 	}
+
+	trailer := buf[messageStart+MessageResponseSize:]
+	rand.Read(trailer)
 	// TODO: allocation could be avoided
 	err = peer.SendBuffers([][]byte{buf})
 	if err != nil {
@@ -322,8 +332,13 @@ func (peer *Peer) SendHandshakeResponse() error {
 }
 
 func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
-	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
 	awg := device.getAWGConfig()
+	if awg.disableCookies {
+		device.log.Verbosef("Sending cookie response blocked for %v due to disabled cookies", initiatingElem.endpoint.DstToString())
+		return nil
+	}
+
+	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
 
 	sender := binary.LittleEndian.Uint32(initiatingElem.packet[4:8])
 	reply, err := device.cookieChecker.CreateReply(
@@ -338,10 +353,12 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	}
 
 	padding := int(awg.paddings.cookie)
-	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageCookieReplySize)
+	trailerLen := max(device.randomTrailer(padding+MessageCookieReplySize, awg), 0)
+	buf := make([]byte, MessageEncapsulatingTransportSize+padding+MessageCookieReplySize+trailerLen)
 	crypt := buf[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding]
 	rand.Read(crypt)
-	packet := buf[MessageEncapsulatingTransportSize+padding:]
+	messageStart := MessageEncapsulatingTransportSize + padding
+	packet := buf[messageStart : messageStart+MessageCookieReplySize]
 	_ = reply.marshal(packet)
 
 	cip, err := awg.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
@@ -351,6 +368,9 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	if cip != nil {
 		cip.XORKeyStream(packet, packet)
 	}
+
+	trailer := buf[messageStart+MessageCookieReplySize:]
+	rand.Read(trailer)
 	// TODO: allocation could be avoided
 	device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
 
@@ -632,6 +652,29 @@ func (device *Device) randomPaddingAddition(packetSize, mtu int) int {
 	return add
 }
 
+func (device *Device) randomTrailer(packetSize int, awg *awgConfig) int {
+	if !awg.randomTrailers {
+		return -1
+	}
+
+	if DefaultUdpWindow < packetSize {
+		return 0
+	}
+	return int(fastrandn(uint32(DefaultUdpWindow - packetSize)))
+}
+
+func (peer *Peer) randomTrailer(packetSize int, awg *awgConfig) int {
+	if !awg.randomTrailers {
+		return -1
+	}
+
+	udpWindow := int(peer.udpWindow.Load())
+	if udpWindow < packetSize {
+		return 0
+	}
+	return int(fastrandn(uint32(udpWindow - packetSize)))
+}
+
 /* Encrypts the elements in the queue
  * and marks them for sequential consumption (by releasing the mutex)
  *
@@ -649,6 +692,9 @@ func (device *Device) RoutineEncryption(id int) {
 			awg = device.getAWGConfig()
 		}
 		for _, elem := range elemsContainer.elems {
+			udpWindow := elem.padding + MinMessageSize + uint32(len(elem.packet))
+			elem.peer.growUDPWindow(udpWindow)
+
 			// fill crypto padding
 			cryptStart := MessageEncapsulatingTransportSize
 			crypt := elem.buffer[cryptStart : cryptStart+int(elem.padding)]
@@ -670,6 +716,9 @@ func (device *Device) RoutineEncryption(id int) {
 			mtu := int(device.tun.mtu.Load())
 
 			paddingSize := device.randomPaddingAddition(packetSize, mtu)
+			if paddingSize < 0 {
+				paddingSize = elem.peer.randomTrailer(packetSize+MinMessageSize+int(elem.padding), awg)
+			}
 			if paddingSize < 0 {
 				// pad content to multiple of 16
 				paddingSize = calculatePaddingSize(packetSize, mtu)

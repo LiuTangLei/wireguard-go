@@ -70,6 +70,18 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 		}
 		buf.WriteByte('\n')
 	}
+	boolf := func(prefix string, val bool) {
+		buf.Grow(3 + len(prefix))
+		buf.WriteString(prefix)
+		buf.WriteByte('=')
+		if val {
+			buf.WriteByte('1')
+		} else {
+			buf.WriteByte('0')
+		}
+		buf.WriteByte('\n')
+
+	}
 
 	func() {
 		// lock required resources
@@ -172,6 +184,8 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 		if rang := device.timings.maxHandshakeAttemps.Load(); !rang.IsZero() {
 			sendf("max_handshake_attempts=%s", rang.ToString())
 		}
+		boolf("random_trailers", awg.randomTrailers)
+		boolf("disable_cookies", awg.disableCookies)
 
 		for _, peer := range device.peers.keyMap {
 			// Serialize peer state.
@@ -515,6 +529,22 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 		device.log.Verbosef("UAPI: Updating max handshake attempts")
 		device.timings.maxHandshakeAttemps.Store(rang)
 
+	case "random_trailers":
+		val, err := strconv.ParseBool(value)
+		if err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse random trailers: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating random trailers")
+		ipcDev.awg.randomTrailers = val
+
+	case "disable_cookies":
+		val, err := strconv.ParseBool(value)
+		if err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse disable cookies: %w", err)
+		}
+		device.log.Verbosef("UAPI: Updating disable cookies")
+		ipcDev.awg.disableCookies = val
+
 	default:
 		return ipcErrorf(ipc.IpcErrorInvalid, "invalid UAPI device key: %v", key)
 	}
@@ -627,6 +657,8 @@ func (device *Device) handlePeerLine(
 		}
 		peer.endpoint.Lock()
 		defer peer.endpoint.Unlock()
+		peer.udpWindow.Store(DefaultUdpWindow)
+		peer.endpoint.clearSrcOnTx = false
 		peer.endpoint.val = endpoint
 
 	case "persistent_keepalive_interval":

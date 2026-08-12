@@ -156,12 +156,15 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			}
 
 			// get message padding and type based on information from S1-S4 and H1-H4
-			msgType, padding := determinePacketTypeAndPadding(packet, MessageUnknownType, typeHash, awg)
+			msgSize, msgType, padding := determinePacketTypeAndPadding(packet, MessageUnknownType, typeHash, awg)
 			if msgType == MessageUnknownType {
 				device.log.Verbosef("Received message with unknown AWG type (size %d)", len(packet))
 				continue
 			}
 			packet = packet[int(padding):]
+			if msgType != MessageTransportType {
+				packet = packet[:msgSize]
+			}
 
 			if cip != nil {
 				applyHash(packet[:4], packet[:4], typeHash)
@@ -522,6 +525,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 			ep.FromPeer(peer.handshake.remoteStatic)
 		}
 		rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
+		peer.growUDPWindow(elem.padding + MessageTransportHeaderSize + uint32(len(elem.packet)))
 
 		if len(elem.packet) == 0 || elem.packet[0] == 0 {
 			device.log.Verbosef("%v - Receiving keepalive packet", peer)
@@ -608,21 +612,23 @@ func (device *Device) DeterminePacketTypeAndPadding(packet []byte, expectedType 
 	if len(typeHashArg) > 0 && len(typeHashArg[0]) >= len(typeHash) {
 		copy(typeHash[:], typeHashArg[0][:len(typeHash)])
 	}
-	return determinePacketTypeAndPadding(packet, expectedType, typeHash[:], device.getAWGConfig())
+	_, msgType, padding := determinePacketTypeAndPadding(packet, expectedType, typeHash[:], device.getAWGConfig())
+	return msgType, padding
 }
 
-func determinePacketTypeAndPadding(packet []byte, expectedType uint32, typeHash []byte, awg *awgConfig) (uint32, uint32) {
+func determinePacketTypeAndPadding(packet []byte, expectedType uint32, typeHash []byte, awg *awgConfig) (int, uint32, uint32) {
 	var headerBytes [4]byte
 	size := len(packet)
 
 	if expectedType == MessageUnknownType || expectedType == MessageInitiationType {
 		padding := awg.paddings.init
 		header := awg.headers.init
+		expectedSize := int(padding) + MessageInitiationSize
 
-		if size == int(padding)+MessageInitiationSize {
+		if size == expectedSize || awg.randomTrailers && size > expectedSize {
 			applyHash(headerBytes[:], packet[padding:padding+4], typeHash)
 			if header.Contains(binary.LittleEndian.Uint32(headerBytes[:])) {
-				return MessageInitiationType, padding
+				return MessageInitiationSize, MessageInitiationType, padding
 			}
 		}
 	}
@@ -630,11 +636,12 @@ func determinePacketTypeAndPadding(packet []byte, expectedType uint32, typeHash 
 	if expectedType == MessageUnknownType || expectedType == MessageResponseType {
 		padding := awg.paddings.response
 		header := awg.headers.response
+		expectedSize := int(padding) + MessageResponseSize
 
-		if size == int(padding)+MessageResponseSize {
+		if size == expectedSize || awg.randomTrailers && size > expectedSize {
 			applyHash(headerBytes[:], packet[padding:padding+4], typeHash)
 			if header.Contains(binary.LittleEndian.Uint32(headerBytes[:])) {
-				return MessageResponseType, padding
+				return MessageResponseSize, MessageResponseType, padding
 			}
 		}
 	}
@@ -642,11 +649,12 @@ func determinePacketTypeAndPadding(packet []byte, expectedType uint32, typeHash 
 	if expectedType == MessageUnknownType || expectedType == MessageCookieReplyType {
 		padding := awg.paddings.cookie
 		header := awg.headers.cookie
+		expectedSize := int(padding) + MessageCookieReplySize
 
-		if size == int(padding)+MessageCookieReplySize {
+		if size == expectedSize || awg.randomTrailers && size > expectedSize {
 			applyHash(headerBytes[:], packet[padding:padding+4], typeHash)
 			if header.Contains(binary.LittleEndian.Uint32(headerBytes[:])) {
-				return MessageCookieReplyType, padding
+				return MessageCookieReplySize, MessageCookieReplyType, padding
 			}
 		}
 	}
@@ -654,14 +662,15 @@ func determinePacketTypeAndPadding(packet []byte, expectedType uint32, typeHash 
 	if expectedType == MessageUnknownType || expectedType == MessageTransportType {
 		padding := awg.paddings.transport
 		header := awg.headers.transport
+		expectedSize := int(padding) + MessageTransportSize
 
-		if size >= int(padding)+MessageTransportHeaderSize {
+		if size >= expectedSize {
 			applyHash(headerBytes[:], packet[padding:padding+4], typeHash)
 			if header.Contains(binary.LittleEndian.Uint32(headerBytes[:])) {
-				return MessageTransportType, padding
+				return MessageTransportSize, MessageTransportType, padding
 			}
 		}
 	}
 
-	return MessageUnknownType, 0
+	return 0, MessageUnknownType, 0
 }

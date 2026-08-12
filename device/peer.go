@@ -95,6 +95,7 @@ type Peer struct {
 	cookieGenerator             CookieGenerator
 	trieEntries                 list.List
 	persistentKeepaliveInterval AtomicUintRange
+	udpWindow                   atomic.Uint32
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -116,6 +117,8 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	// create peer
 	peer := new(Peer)
+
+	peer.udpWindow.Store(DefaultUdpWindow)
 
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
@@ -513,6 +516,14 @@ func (peer *Peer) hasKeyMaterial() bool {
 	keypairs.RLock()
 	defer keypairs.RUnlock()
 	return keypairs.previous != nil || keypairs.current != nil || keypairs.next.Load() != nil
+}
+
+func (peer *Peer) growUDPWindow(window uint32) {
+	for current := peer.udpWindow.Load(); current < window; current = peer.udpWindow.Load() {
+		if peer.udpWindow.CompareAndSwap(current, window) {
+			return
+		}
+	}
 }
 
 func (peer *Peer) markEndpointSrcForClearing() {
