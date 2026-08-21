@@ -365,7 +365,9 @@ func (device *Device) RoutineHandshake(id int) {
 				// verify MAC2 field
 
 				if !device.cookieChecker.CheckMAC2(elem.packet, elem.endpoint.DstToBytes()) {
-					device.SendHandshakeCookie(&elem)
+					if err := device.SendHandshakeCookie(&elem); err != nil {
+						device.log.Verbosef("Failed to send cookie response: %v", err)
+					}
 					goto skip
 				}
 
@@ -525,7 +527,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 			ep.FromPeer(peer.handshake.remoteStatic)
 		}
 		rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
-		peer.growUDPWindow(elem.padding + MessageTransportHeaderSize + uint32(len(elem.packet)))
+		peer.growUDPWindow(elem.padding + MinMessageSize + uint32(len(elem.packet)))
 
 		if len(elem.packet) == 0 || elem.packet[0] == 0 {
 			device.log.Verbosef("%v - Receiving keepalive packet", peer)

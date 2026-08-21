@@ -66,8 +66,10 @@ type BindSocketToInterface interface {
 	BindSocketToInterface6(interfaceIndex uint32, blackhole bool) error
 }
 
-// PeekLookAtSocketFd is implemented by Bind objects that support having their
-// file descriptor peeked at. Used by wireguard-android.
+// PeekLookAtSocketFd is implemented by Bind objects that expose their active
+// socket descriptor or handle to platform integrations. The returned value is
+// borrowed: ownership remains with Bind, and it is valid only while Bind is
+// open.
 type PeekLookAtSocketFd interface {
 	PeekLookAtSocketFd4() (fd int, err error)
 	PeekLookAtSocketFd6() (fd int, err error)

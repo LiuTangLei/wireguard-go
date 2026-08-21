@@ -320,6 +320,11 @@ func TestAWGDevicePing(t *testing.T) {
 		"h2", "67543-67550",
 		"h3", "123123-123200",
 		"h4", "32345-32350",
+		"i1", "<b 0xf6ab3267fa><b 0xf6ab><t><r 10>",
+		"i2", "<b 0xf6ab3267fa><b 0xf6ab><t><rc 10>",
+		"i3", "<b 0xf6ab3267fa><b 0xf6ab><t><rd 10>",
+		"i4", "<b 0xf6ab3267fa><r 100>",
+		"i5", "<b 0x0102><t>",
 	)
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		pair.Send(t, Ping, nil)
@@ -375,9 +380,9 @@ func TestAWGHandshakeDevicePing(t *testing.T) {
 
 	goroutineLeakCheck(t)
 	pair := genTestPair(t, true,
-		"i1", "<b 0xf6ab3267fa><c><b 0xf6ab><t><r 10>",
-		"i2", "<b 0xf6ab3267fa><c><b 0xf6ab><t><rc 10>",
-		"i3", "<b 0xf6ab3267fa><c><b 0xf6ab><t><rd 10>",
+		"i1", "<b 0xf6ab3267fa><b 0xf6ab><t><r 10>",
+		"i2", "<b 0xf6ab3267fa><b 0xf6ab><t><rc 10>",
+		"i3", "<b 0xf6ab3267fa><b 0xf6ab><t><rd 10>",
 		"i4", "<b 0xf6ab3267fa><r 100>",
 		// "jc", "1",
 		// "jmin", "500",

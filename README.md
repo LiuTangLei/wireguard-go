@@ -90,6 +90,27 @@ Header protection is the mechanism of protecting low-entropy values of packets' 
 > [!TIP]
 > It's important to specify content padding on both sides. However, this is not strictly required and could be omitted.
 
+### Random trailers and cookies [AWG 3.1+]
+
+```
+[Device]
++ RandomTrailers = bool # must match on both peers
++ DisableCookies = bool # local policy
+```
+
+`RandomTrailers` appends a random-length trailer to handshake messages and,
+when `ContentPaddingAddition` is not configured, varies transport padding using
+the observed UDP packet-size window. It defaults to `false`. Enable it only
+after both peers have upgraded to AWG 3.1; older releases and peers where the
+option is disabled reject the extended handshake length.
+
+`DisableCookies` prevents the interface from sending WireGuard cookie replies.
+It also defaults to `false`. Enabling it does not change normal packet formats,
+but removes the cookie challenge response used by WireGuard while under load,
+so use it only when that tradeoff is intentional.
+
+The corresponding UAPI keys are `random_trailers` and `disable_cookies`.
+
 ### Timings [AWG 3+]
 
 This param could be used to customize default Wireguard's timings

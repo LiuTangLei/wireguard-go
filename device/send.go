@@ -157,7 +157,7 @@ func (peer *Peer) SendPriorityMessage() {
 	awg := peer.device.getAWGConfig()
 	padding := awg.paddings.transport
 	offset := MessageEncapsulatingTransportSize + int(padding) + MessageTransportHeaderSize
-	if len(msg) > MaxMessageSize-offset {
+	if len(msg)+chacha20poly1305.Overhead > MaxMessageSize-offset {
 		peer.device.log.Verbosef("%v - Failed to queue priority message due to AWG transport padding", peer)
 		return
 	}
@@ -372,9 +372,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	trailer := buf[messageStart+MessageCookieReplySize:]
 	rand.Read(trailer)
 	// TODO: allocation could be avoided
-	device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
-
-	return nil
+	return device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
 }
 
 func (peer *Peer) keepKeyFreshSending() {
@@ -441,7 +439,7 @@ func (device *Device) RoutineReadFromTUN() {
 			}
 
 			elem := elems[i]
-			if sendOffset+sizes[i] > len(bufs[i]) {
+			if sendOffset+sizes[i]+chacha20poly1305.Overhead > len(bufs[i]) {
 				device.log.Verbosef("Dropped outbound packet: AWG transport padding exceeds buffer capacity")
 				continue
 			}
@@ -697,11 +695,16 @@ func (device *Device) RoutineEncryption(id int) {
 
 			// fill crypto padding
 			cryptStart := MessageEncapsulatingTransportSize
+			headerStart := cryptStart + int(elem.padding)
+			if headerStart+MessageTransportSize > len(elem.buffer) {
+				device.log.Errorf("Routing: AWG transport padding exceeds buffer capacity - packet dropped")
+				elem.packet = nil
+				continue
+			}
 			crypt := elem.buffer[cryptStart : cryptStart+int(elem.padding)]
 			rand.Read(crypt)
 
 			// populate header fields
-			headerStart := cryptStart + int(elem.padding)
 			header := elem.buffer[headerStart : headerStart+MessageTransportHeaderSize]
 
 			fieldType := header[0:4]
@@ -713,6 +716,12 @@ func (device *Device) RoutineEncryption(id int) {
 			binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
 			packetSize := len(elem.packet)
+			maxPacketSize := len(elem.buffer) - headerStart - MessageTransportSize
+			if packetSize > maxPacketSize {
+				device.log.Errorf("Routing: transport packet exceeds buffer capacity - packet dropped")
+				elem.packet = nil
+				continue
+			}
 			mtu := int(device.tun.mtu.Load())
 
 			paddingSize := device.randomPaddingAddition(packetSize, mtu)
@@ -723,6 +732,7 @@ func (device *Device) RoutineEncryption(id int) {
 				// pad content to multiple of 16
 				paddingSize = calculatePaddingSize(packetSize, mtu)
 			}
+			paddingSize = min(paddingSize, maxPacketSize-packetSize)
 
 			// append trailing zeroes
 			oldLen := len(elem.packet)

@@ -120,11 +120,11 @@ type config struct {
 
 func defaultConfig() config {
 	return config{
-		queueStagedSize:            DefaultQueueStagedSize,
-		queueOutboundSize:          DefaultQueueOutboundSize,
-		queueInboundSize:           DefaultQueueInboundSize,
-		queueHandshakeSize:         DefaultQueueHandshakeSize,
-		preallocatedBuffersPerPool: DefaultPreallocatedBuffersPerPool,
+		queueStagedSize:            QueueStagedSize,
+		queueOutboundSize:          QueueOutboundSize,
+		queueInboundSize:           QueueInboundSize,
+		queueHandshakeSize:         QueueHandshakeSize,
+		preallocatedBuffersPerPool: PreallocatedBuffersPerPool,
 	}
 }
 
@@ -677,9 +677,9 @@ func (device *Device) SetPriorityMessageOnEstablishmentFunc(f PeerPriorityMessag
 // following its next outbound transport message. It is a no-op if the peer is
 // unknown or currently holds no key material.
 //
-// The initiation remains subject to [RekeyTimeout] elapsing since the last
-// handshake message was sent. A request blocked by that window stays armed for
-// a later transport message rather than being dropped.
+// The initiation remains subject to the configured minimum rekey timeout
+// elapsing since the last handshake message was sent. A request blocked by that
+// window stays armed for a later transport message rather than being dropped.
 func (device *Device) ScheduleHandshakeOnUserSend(peer NoisePublicKey) {
 	device.peers.RLock()
 	defer device.peers.RUnlock()

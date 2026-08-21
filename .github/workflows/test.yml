@@ -36,6 +36,11 @@ jobs:
             goarch: amd64
           - goos: windows
             goarch: arm64
+          # Android core packages (CGO-free build)
+          - goos: android
+            goarch: arm64
+          - goos: android
+            goarch: amd64
           # BSDs
           - goos: freebsd
             goarch: amd64
@@ -49,7 +54,33 @@ jobs:
       with:
         go-version-file: go.mod
     - name: build
-      run: go build ./...
+      if: matrix.goos != 'android'
+      # The optional Outline adapter depends on a CGO-only DNS helper on Unix,
+      # while this matrix intentionally validates CGO-free core builds. The
+      # native test job below still builds and tests Outline with CGO enabled.
+      run: >-
+        go build
+        .
+        ./cmd/check-lockorder
+        ./conn
+        ./conn/bindtest
+        ./device
+        ./ipc
+        ./ratelimiter
+        ./replay
+        ./rwcancel
+        ./tai64n
+        ./tun
+        ./tun/netstack
+        ./tun/tuntest
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        GOARM: ${{ matrix.goarm }}
+        CGO_ENABLED: "0"
+    - name: build Android core
+      if: matrix.goos == 'android'
+      run: go build ./conn ./device ./tun ./ipc
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
@@ -84,3 +115,30 @@ jobs:
         go-version-file: go.mod
     - name: check-lockorder
       run: go run ./cmd/check-lockorder
+
+  test-windows-sockets:
+    runs-on: windows-2022
+    steps:
+    - name: checkout
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - name: setup go
+      uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      with:
+        go-version-file: go.mod
+    - name: test Windows socket handles
+      run: go test -race ./conn
+
+  build-ios-core:
+    runs-on: macos-15
+    steps:
+    - name: checkout
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - name: setup go
+      uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      with:
+        go-version-file: go.mod
+    - name: compile iOS core and tests
+      run: >-
+        GOOS=ios GOARCH=arm64 CGO_ENABLED=1
+        go test -run '^$' -exec=/usr/bin/true
+        ./conn ./device ./tun ./ipc

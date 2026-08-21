@@ -9,7 +9,7 @@ package device
 
 // Fit within memory limits for iOS's Network Extension API, which has stricter
 // requirements. Heavier network extensions can reduce these further using
-// [Device.Option]'s.
+// [Option] values.
 const (
 	DefaultQueueStagedSize            = 128
 	DefaultQueueOutboundSize          = 1024

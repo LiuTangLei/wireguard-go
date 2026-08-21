@@ -92,8 +92,9 @@ type WinRingEndpoint struct {
 }
 
 var (
-	_ Bind     = (*WinRingBind)(nil)
-	_ Endpoint = (*WinRingEndpoint)(nil)
+	_ Bind               = (*WinRingBind)(nil)
+	_ Endpoint           = (*WinRingEndpoint)(nil)
+	_ PeekLookAtSocketFd = (*WinRingBind)(nil)
 )
 
 func (*WinRingBind) ParseEndpoint(s string) (Endpoint, error) {

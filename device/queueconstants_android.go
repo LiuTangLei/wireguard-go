@@ -14,6 +14,6 @@ const (
 	DefaultQueueOutboundSize          = 1024
 	DefaultQueueInboundSize           = 1024
 	DefaultQueueHandshakeSize         = 1024
-	MaxSegmentSize                    = (1 << 16) - 1 // preserve AWG padding compatibility
+	MaxSegmentSize                    = (1 << 16) - 1 // largest possible UDP datagram
 	DefaultPreallocatedBuffersPerPool = 4096
 )

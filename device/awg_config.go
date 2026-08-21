@@ -71,3 +71,22 @@ func validateAWGHeaders(headers awgHeaderConfig) error {
 	}
 	return nil
 }
+
+func validateAWGPaddings(paddings awgPaddingConfig) error {
+	limits := []struct {
+		name  string
+		value uint32
+		max   int
+	}{
+		{"S1", paddings.init, MaxMessageSize - MessageInitiationSize},
+		{"S2", paddings.response, MaxMessageSize - MessageResponseSize},
+		{"S3", paddings.cookie, MaxMessageSize - MessageCookieReplySize},
+		{"S4", paddings.transport, MaxMessageSize - MessageEncapsulatingTransportSize - MessageTransportSize},
+	}
+	for _, limit := range limits {
+		if uint64(limit.value) > uint64(limit.max) {
+			return errors.New(limit.name + " exceeds the packet buffer capacity")
+		}
+	}
+	return nil
+}

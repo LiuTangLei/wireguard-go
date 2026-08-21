@@ -797,6 +797,9 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 	if err := validateAWGHeaders(d.awg.headers); err != nil {
 		return err
 	}
+	if err := validateAWGPaddings(d.awg.paddings); err != nil {
+		return err
+	}
 
 	if !d.awg.headerProtectionKey.IsZero() {
 		paddings := []uint32{
