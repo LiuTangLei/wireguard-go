@@ -333,10 +333,6 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
 	awg := device.getAWGConfig()
-	if awg.disableCookies {
-		device.log.Verbosef("Sending cookie response blocked for %v due to disabled cookies", initiatingElem.endpoint.DstToString())
-		return nil
-	}
 
 	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
 

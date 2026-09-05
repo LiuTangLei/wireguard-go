@@ -359,8 +359,7 @@ func (device *Device) RoutineHandshake(id int) {
 			}
 
 			// endpoints destination address is the source of the datagram
-
-			if device.IsUnderLoad() {
+			if !device.getAWGConfig().disableCookies && device.IsUnderLoad() {
 
 				// verify MAC2 field
 

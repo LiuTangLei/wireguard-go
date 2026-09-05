@@ -250,11 +250,12 @@ func TestAWG31CookieRandomTrailerDoesNotPanic(t *testing.T) {
 	if err := device.IpcSet(uapiCfg("disable_cookies", "true")); err != nil {
 		t.Fatal(err)
 	}
+	bind.sendErr = nil
 	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, endpoint: cookieTestEndpoint{}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := bind.sends.Load(); got != 2 {
-		t.Fatalf("disabled cookies changed send count to %d", got)
+	if got := bind.sends.Load(); got != 3 {
+		t.Fatalf("manual cookie sends were blocked when disable_cookies was enabled: %d", got)
 	}
 }
 
