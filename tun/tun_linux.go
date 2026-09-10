@@ -46,8 +46,11 @@ type NativeTun struct {
 	nameCache string    // name of interface
 	nameErr   error
 
-	readOpMu sync.Mutex                    // readOpMu guards readBuff
-	readBuff [virtioNetHdrLen + 65535]byte // if vnetHdr every read() is prefixed by virtioNetHdr
+	readBatching   bool // opt-in ready-record draining; guarded by readOpMu
+	readPendingLen int  // one retained virtio record, never partial packet data
+	readPendingErr error
+	readOpMu       sync.Mutex                    // readOpMu guards readBuff
+	readBuff       [virtioNetHdrLen + 65535]byte // if vnetHdr every read() is prefixed by virtioNetHdr
 
 	writeOpMu   sync.Mutex // writeOpMu guards the following fields
 	toWrite     groToWrite
@@ -450,6 +453,19 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
+	if tun.readPendingErr != nil {
+		err := tun.readPendingErr
+		tun.readPendingErr = nil
+		return 0, err
+	}
+	if tun.readPendingLen != 0 {
+		n := tun.readPendingLen
+		tun.readPendingLen = 0
+		return handleVirtioRead(tun.readBuff[:n], bufs, sizes, offset)
+	}
+	if tun.readBatching {
+		return tun.readAvailable(bufs, sizes, offset)
+	}
 	select {
 	case err := <-tun.errors:
 		return 0, err
