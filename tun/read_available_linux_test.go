@@ -51,11 +51,11 @@ func availableBuffers() ([][]byte, []int) {
 func TestNativeReadAvailableSmallPacketBoundsAndOwnership(t *testing.T) {
 	d, fd := readAvailableFixture(t)
 	b, sizes := availableBuffers()
-	for i := 0; i < 20; i++ {
+	for i := 0; i < maxReadyReadRecords+4; i++ {
 		pushAvailable(t, fd, availableRecord(bytes.Repeat([]byte{byte(i + 1)}, 40), virtioNetHdr{}))
 	}
 	n, err := d.Read(b, sizes, 8)
-	if err != nil || n != 16 {
+	if err != nil || n != maxReadyReadRecords {
 		t.Fatalf("first batch=%d %v", n, err)
 	}
 	for i := 0; i < n; i++ {
@@ -68,7 +68,7 @@ func TestNativeReadAvailableSmallPacketBoundsAndOwnership(t *testing.T) {
 		t.Fatalf("second batch=%d %v", n, err)
 	}
 	for i := 0; i < n; i++ {
-		if !bytes.Equal(b[i][8:48], bytes.Repeat([]byte{byte(i + 17)}, 40)) {
+		if !bytes.Equal(b[i][8:48], bytes.Repeat([]byte{byte(i + maxReadyReadRecords + 1)}, 40)) {
 			t.Fatal("tail records missing")
 		}
 	}

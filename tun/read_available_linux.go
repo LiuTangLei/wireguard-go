@@ -9,6 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Match the bounded H3 enqueue vector. These are only records already ready
+// on the FD; an empty queue is never waited on after the first record.
+const maxReadyReadRecords = 32
+
 // SetReadBatching opts a Linux virtio TUN into bounded ready-record reads.
 // Standard WG/AWG callers retain the original behavior unless they explicitly
 // enable this before starting their reader. No kernel qdisc or offload setting
@@ -20,7 +24,7 @@ func (tun *NativeTun) SetReadBatching(enabled bool) bool {
 	return tun.readBatching
 }
 
-// readAvailable waits for the FIRST record only, then drains at most sixteen
+// readAvailable waits for the FIRST record only, then drains at most 32
 // already-ready records in one netpoll read operation. A GSO record following
 // smaller records is retained intact for the next Read, where it has the whole
 // caller vector available. This avoids overflowing a partly filled vector or
@@ -38,7 +42,7 @@ func (tun *NativeTun) readAvailable(bufs [][]byte, sizes []int, offset int) (int
 	count := 0
 	var readErr error
 	err := tun.tunRawConn.Read(func(fd uintptr) bool {
-		for count < min(16, len(bufs)) {
+		for count < min(maxReadyReadRecords, len(bufs)) {
 			n, e := unix.Read(int(fd), tun.readBuff[:])
 			if e == unix.EINTR {
 				continue
