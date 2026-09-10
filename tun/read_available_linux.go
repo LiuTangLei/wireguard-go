@@ -75,6 +75,12 @@ func (tun *NativeTun) readAvailable(bufs [][]byte, sizes []int, offset int) (int
 		}
 		return true
 	})
+	// syscall.RawConn exposes an internal poller closing error rather than
+	// os.ErrClosed. Normalize only a raw poller failure after this device's
+	// own Close; preserve unrelated syscall, decoder and deferred errors.
+	if err != nil && tun.closed.Load() {
+		err = os.ErrClosed
+	}
 	if err == nil {
 		err = readErr
 	}

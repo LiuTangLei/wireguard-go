@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -41,6 +42,7 @@ type NativeTun struct {
 	vnetHdr                 bool
 
 	closeOnce sync.Once
+	closed    atomic.Bool // normalize RawConn poller errors after our Close
 
 	nameOnce  sync.Once // guards calling initNameCache, which sets following fields
 	nameCache string    // name of interface
@@ -497,6 +499,7 @@ func (tun *NativeTun) Events() <-chan Event {
 func (tun *NativeTun) Close() error {
 	var err1, err2 error
 	tun.closeOnce.Do(func() {
+		tun.closed.Store(true)
 		if tun.statusListenersShutdown != nil {
 			close(tun.statusListenersShutdown)
 			if tun.netlinkCancel != nil {
