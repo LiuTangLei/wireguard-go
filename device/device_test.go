@@ -166,15 +166,14 @@ func (pair *testPair) Send(
 }
 
 // genTestPair creates a testPair.
-func genTestPair(
-	tb testing.TB,
-	realSocket bool,
-	extraCfg ...string,
-) (pair testPair) {
-	var cfg, endpointCfg [2]string
-	cfg, endpointCfg = genConfigs(tb, extraCfg...)
-
-	var opts []Option
+func genTestPair(tb testing.TB, realSocket bool, extraCfg ...string) testPair {
+ return genTestPairConfig(tb, realSocket, 1, extraCfg, nil)
+}
+func genTestPairQueues(tb testing.TB, realSocket bool, queues int, opts ...Option) testPair {
+ return genTestPairConfig(tb, realSocket, queues, nil, opts)
+}
+func genTestPairConfig(tb testing.TB, realSocket bool, queues int, extraCfg []string, opts []Option) (pair testPair) {
+ cfg, endpointCfg := genConfigs(tb, extraCfg...)
 	var binds [2]conn.Bind
 	if realSocket {
 		binds[0], binds[1] = conn.NewDefaultBind(), conn.NewDefaultBind()
@@ -184,7 +183,7 @@ func genTestPair(
 	// Bring up a ChannelTun for each config.
 	for i := range pair {
 		p := &pair[i]
-		p.tun = tuntest.NewChannelTUN()
+		p.tun = tuntest.NewMultiQueueChannelTUN(queues)
 		p.ip = netip.AddrFrom4([4]byte{1, 0, 0, byte(i + 1)})
 		level := LogLevelVerbose
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
@@ -296,9 +295,21 @@ func TestPriorityMessageOnEstablishment(t *testing.T) {
 	}
 }
 
-func TestTwoDevicePing(t *testing.T) {
+func forEachQueueCount(t *testing.T, fn func(t *testing.T, queues int)) {
+	t.Helper()
+	var testQueueCounts = []int{1, 4}
+	for _, queues := range testQueueCounts {
+		t.Run(fmt.Sprintf("queues=%d", queues), func(t *testing.T) {
+			fn(t, queues)
+		})
+	}
+}
+
+func TestTwoDevicePing(t *testing.T) { forEachQueueCount(t, testTwoDevicePing) }
+
+func testTwoDevicePing(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
-	pair := genTestPair(t, true)
+	pair := genTestPairQueues(t, true, queues)
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		pair.Send(t, Ping, nil)
 	})
@@ -410,13 +421,15 @@ func TestAWGHandshakeDevicePing(t *testing.T) {
 	})
 }
 
-func TestUpDown(t *testing.T) {
+func TestUpDown(t *testing.T) { forEachQueueCount(t, testUpDown) }
+
+func testUpDown(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
 	const itrials = 50
 	const otrials = 10
 
 	for n := 0; n < otrials; n++ {
-		pair := genTestPair(t, false)
+		pair := genTestPairQueues(t, false, queues)
 		for i := range pair {
 			for k := range pair[i].dev.peers.keyMap {
 				pair[i].dev.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(k[:])))
@@ -449,8 +462,10 @@ func TestUpDown(t *testing.T) {
 
 // TestConcurrencySafety does other things concurrently with tunnel use.
 // It is intended to be used with the race detector to catch data races.
-func TestConcurrencySafety(t *testing.T) {
-	pair := genTestPair(t, true)
+func TestConcurrencySafety(t *testing.T) { forEachQueueCount(t, testConcurrencySafety) }
+
+func testConcurrencySafety(t *testing.T, queues int) {
+	pair := genTestPairQueues(t, true, queues)
 	done := make(chan struct{})
 
 	const warmupIters = 10
@@ -971,7 +986,7 @@ func TestMessageInitiationMetrics(t *testing.T) {
 func TestHandshakeMetrics(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var initial, retry, response, initiatorCompleted, responderCompleted expvar.Int
-		pair := genTestPair(t, false, WithMetrics(Metrics{
+		pair := genTestPairQueues(t, false, 1, WithMetrics(Metrics{
 			MessageInitiationTXAttemptInitial: &initial,
 			MessageInitiationTXAttemptRetry:   &retry,
 			MessageResponseTXAttempt:          &response,
