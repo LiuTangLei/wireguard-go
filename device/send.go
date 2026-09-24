@@ -354,6 +354,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	messageStart := MessageEncapsulatingTransportSize + padding
 	packet := buf[messageStart : messageStart+MessageCookieReplySize]
 	_ = reply.marshal(packet)
+	device.config.metrics.MessageCookieReplyTXAttempt.Add(1)
 
 	cip, err := awg.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
 	if err != nil {
