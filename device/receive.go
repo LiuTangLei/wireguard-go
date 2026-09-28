@@ -513,6 +513,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 		}
 
 		if !elem.keypair.replayFilter.ValidateCounter(elem.counter, RejectAfterMessages) {
+			device.config.metrics.MessageTransportRXDroppedReplay.Add(1)
 			continue
 		}
 
