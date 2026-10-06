@@ -141,6 +141,7 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 	}
 	transportCsumAt := int(options.CsumStart + options.CsumOffset)
 	var firstTCPSeqNum uint32
+	var firstTCPFlags uint8
 	var protocol uint8
 	if options.GSOType == GSOTCPv4 || options.GSOType == GSOTCPv6 {
 		protocol = ipProtoTCP
@@ -149,6 +150,7 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 				len(in), options.CsumStart, 20)
 		}
 		firstTCPSeqNum = binary.BigEndian.Uint32(in[options.CsumStart+4:])
+		firstTCPFlags = in[options.CsumStart+tcpFlagsOffset]
 	} else {
 		protocol = ipProtoUDP
 	}
@@ -197,6 +199,9 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 				// FIN and PSH should only be set on last segment
 				clearFlags := tcpFlagFIN | tcpFlagPSH
 				out[options.CsumStart+tcpFlagsOffset] &^= clearFlags
+			} else {
+				// The first output may alias in and have cleared FIN and PSH.
+				out[options.CsumStart+tcpFlagsOffset] = firstTCPFlags
 			}
 		} else {
 			// set UDP header len
