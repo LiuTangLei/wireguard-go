@@ -21,7 +21,8 @@ func readAvailableFixture(t *testing.T) (*NativeTun, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	device := &NativeTun{tunFile: file, tunRawConn: raw, vnetHdr: true, errors: make(chan error, 1), batchSize: 128}
+	device := &NativeTun{vnetHdr: true, errors: make(chan error, 1), batchSize: 128}
+	device.queues = []*tunQueue{{tun: device, file: file, rawConn: raw}}
 	t.Cleanup(func() { device.Close(); unix.Close(pair[1]) })
 	if !device.SetReadBatching(true) {
 		t.Fatal("virtio reader not enabled")
@@ -54,7 +55,7 @@ func TestNativeReadAvailableSmallPacketBoundsAndOwnership(t *testing.T) {
 	for i := 0; i < maxReadyReadRecords+4; i++ {
 		pushAvailable(t, fd, availableRecord(bytes.Repeat([]byte{byte(i + 1)}, 40), virtioNetHdr{}))
 	}
-	n, err := d.Read(b, sizes, 8)
+	n, err := readAvailableLegacy(d, b, sizes, 8)
 	if err != nil || n != maxReadyReadRecords {
 		t.Fatalf("first batch=%d %v", n, err)
 	}
@@ -63,7 +64,7 @@ func TestNativeReadAvailableSmallPacketBoundsAndOwnership(t *testing.T) {
 			t.Fatal("boundary, offset or ownership corrupted")
 		}
 	}
-	n, err = d.Read(b, sizes, 8)
+	n, err = readAvailableLegacy(d, b, sizes, 8)
 	if err != nil || n != 4 {
 		t.Fatalf("second batch=%d %v", n, err)
 	}
@@ -79,7 +80,7 @@ func TestNativeReadAvailableDoesNotWaitToFill(t *testing.T) {
 	pushAvailable(t, fd, availableRecord([]byte{1, 2, 3, 4}, virtioNetHdr{}))
 	done := make(chan struct{})
 	go func() {
-		n, err := d.Read(b, sizes, 8)
+		n, err := readAvailableLegacy(d, b, sizes, 8)
 		if err != nil || n != 1 {
 			t.Errorf("single=%d %v", n, err)
 		}
@@ -112,20 +113,25 @@ func TestNativeReadAvailableRetainsGSOAcrossDisable(t *testing.T) {
 	pushAvailable(t, fd, availableRecord(first, virtioNetHdr{}))
 	pushAvailable(t, fd, large)
 	pushAvailable(t, fd, availableRecord(last, virtioNetHdr{}))
-	n, err := d.Read(b, sizes, 8)
+	n, err := readAvailableLegacy(d, b, sizes, 8)
 	if err != nil || n != 1 || !bytes.Equal(b[0][8:12], first) {
 		t.Fatalf("prefix batch=%d %v", n, err)
 	}
-	if d.readPendingLen != len(large) {
+	if d.queues[0].readPendingLen != len(large) {
 		t.Fatal("GSO record was not retained")
 	}
 	d.SetReadBatching(false)
-	n, err = d.Read(b, sizes, 8)
+	n, err = readAvailableLegacy(d, b, sizes, 8)
 	if err != nil || n != 4 {
 		t.Fatalf("pending GSO=%d %v", n, err)
 	}
 	expected, expectedSizes := availableBuffers()
-	count, err := handleVirtioRead(bytes.Clone(large), expected, expectedSizes, 8)
+	slab := make([]byte, 2*(1<<16-1))
+	metas := make([]ReadPacket, len(expected))
+	count, err := handleVirtioRead(bytes.Clone(large), slab, metas)
+	for i, p := range metas[:count] {
+		expectedSizes[i] = copy(expected[i][8:], slab[p.Offset:p.Offset+p.Size])
+	}
 	if err != nil || count != n {
 		t.Fatal("invalid test GSO")
 	}
@@ -134,7 +140,7 @@ func TestNativeReadAvailableRetainsGSOAcrossDisable(t *testing.T) {
 			t.Fatal("GSO contents changed")
 		}
 	}
-	n, err = d.Read(b, sizes, 8)
+	n, err = readAvailableLegacy(d, b, sizes, 8)
 	if err != nil || n != 1 || !bytes.Equal(b[0][8:12], last) {
 		t.Fatalf("after GSO=%d %v", n, err)
 	}
@@ -144,12 +150,23 @@ func TestNativeReadAvailableDefersErrorAfterGoodRecord(t *testing.T) {
 	b, sizes := availableBuffers()
 	pushAvailable(t, fd, availableRecord([]byte{1, 2, 3, 4}, virtioNetHdr{}))
 	pushAvailable(t, fd, []byte{1})
-	n, err := d.Read(b, sizes, 8)
+	n, err := readAvailableLegacy(d, b, sizes, 8)
 	if n != 1 || err != nil {
 		t.Fatalf("valid prefix lost: %d %v", n, err)
 	}
-	n, err = d.Read(b, sizes, 8)
+	n, err = readAvailableLegacy(d, b, sizes, 8)
 	if n != 0 || err == nil {
 		t.Fatal("malformed record error hidden")
 	}
+}
+
+// Adapt the original ownership and deferred-error assertions to the slab API.
+func readAvailableLegacy(d *NativeTun, bufs [][]byte, sizes []int, offset int) (int, error) {
+	slab := make([]byte, 2*(1<<16-1))
+	packets := make([]ReadPacket, len(bufs))
+	n, err := d.Read(slab, packets)
+	for i, p := range packets[:n] {
+		sizes[i] = copy(bufs[i][offset:], slab[p.Offset:p.Offset+p.Size])
+	}
+	return n, err
 }

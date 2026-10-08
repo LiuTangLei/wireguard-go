@@ -7,6 +7,7 @@ package device
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/LiuTangLei/wireguard-go/tun"
@@ -63,4 +64,23 @@ func (p *packetBuf) decRef() {
 	} else if c < 0 {
 		panic(fmt.Sprintf("packetBuf.decRef below zero (%d)", c))
 	}
+}
+
+// AWG expansion must not borrow from the bounded input pool while holding an
+// input slab: iOS can have every input buffer queued for encryption at once.
+// Separate pools also keep ordinary prefixed MTU packets in small buffers.
+var awgSmallBuffers, awgLargeBuffers sync.Pool
+
+func init() {
+	awgSmallBuffers.New = func() any { return newPacketBuf(2048, func(p *packetBuf) { awgSmallBuffers.Put(p) }) }
+	awgLargeBuffers.New = func() any { return newPacketBuf(MaxMessageSize, func(p *packetBuf) { awgLargeBuffers.Put(p) }) }
+}
+func getAWGPacketBuf(size int) *packetBuf {
+	pool := &awgSmallBuffers
+	if size > 2048 {
+		pool = &awgLargeBuffers
+	}
+	p := pool.Get().(*packetBuf)
+	p.incRef()
+	return p
 }

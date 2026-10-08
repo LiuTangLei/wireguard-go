@@ -88,7 +88,7 @@ func TestGSOExactStartOverlapTCPFlagsAndChecksum(t *testing.T) {
 					t.Run(fmt.Sprintf("v%d-payload%d-N%d-flags%x", version, payloadSize, count, flags), func(t *testing.T) {
 						packet, opts := overlapTCPRecord(version, payloadSize, count, flags)
 						want, ws := overlapOutputs(count, len(packet))
-						n, err := GSOSplit(bytes.Clone(packet), opts, want, ws, 16)
+						n, err := splitOverlapFixture(bytes.Clone(packet), opts, want, ws, false)
 						if err != nil || n != count {
 							t.Fatalf("disjoint %d %v", n, err)
 						}
@@ -99,7 +99,7 @@ func TestGSOExactStartOverlapTCPFlagsAndChecksum(t *testing.T) {
 						if &in[0] != &got[0][16] {
 							t.Fatal("fixture did not actually overlap")
 						}
-						n, err = GSOSplit(in, opts, got, gs, 16)
+						n, err = splitOverlapFixture(in, opts, got, gs, true)
 						if err != nil || n != count {
 							t.Fatalf("overlap %d %v", n, err)
 						}
@@ -117,4 +117,18 @@ func TestGSOExactStartOverlapTCPFlagsAndChecksum(t *testing.T) {
 			}
 		}
 	}
+}
+
+func splitOverlapFixture(in []byte, opts GSOOptions, bufs [][]byte, sizes []int, overlap bool) (int, error) {
+	slab := make([]byte, 2*(1<<16-1))
+	packets := make([]ReadPacket, len(bufs))
+	if overlap {
+		copy(slab[ReadPacketSpacing:], in)
+		in = slab[ReadPacketSpacing : ReadPacketSpacing+len(in)]
+	}
+	n, err := GSOSplit(in, opts, slab, packets, ReadPacketSpacing)
+	for i, p := range packets[:n] {
+		sizes[i] = copy(bufs[i][16:], slab[p.Offset:p.Offset+p.Size])
+	}
+	return n, err
 }

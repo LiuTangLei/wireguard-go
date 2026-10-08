@@ -11,11 +11,11 @@ import (
 	"os"
 	"strings"
 
+	_ "github.com/LiuTangLei/wireguard-go/tsasm/amd64/chacha20poly1305"
 	. "github.com/mmcloughlin/avo/build"
 	"github.com/mmcloughlin/avo/ir"
 	. "github.com/mmcloughlin/avo/operand"
 	. "github.com/mmcloughlin/avo/reg"
-	_ "github.com/LiuTangLei/wireguard-go/tsasm/amd64/chacha20poly1305"
 )
 
 //go:generate go run . -out ../chacha20poly1305_amd64.s -pkg chacha20poly1305

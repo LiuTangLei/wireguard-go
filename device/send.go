@@ -755,7 +755,7 @@ func (device *Device) RoutineEncryption(id int) {
 			// absolute position in the slab. Never overwrite an adjacent packet.
 			if int(elem.padding) > 0 || cap(elem.packet)-len(elem.packet) < paddingSize+chacha20poly1305.Overhead {
 				old := elem.buffer
-				elem.buffer = device.getPacketBuf()
+				elem.buffer = getAWGPacketBuf(neededHead + packetSize + paddingSize + chacha20poly1305.Overhead)
 				elem.plaintextOffset = neededHead
 				copy(elem.buffer.slab[neededHead:], elem.packet)
 				elem.packet = elem.buffer.slab[neededHead : neededHead+packetSize]

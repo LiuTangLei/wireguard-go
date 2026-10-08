@@ -8,7 +8,7 @@ package device
 import (
 	"sync"
 
-	"github.com/tailscale/wireguard-go/tun"
+	"github.com/LiuTangLei/wireguard-go/tun"
 )
 
 type WaitPool struct {

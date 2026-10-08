@@ -14,7 +14,7 @@ func TestNativeReadAvailableHonorsSmallCallerVector(t *testing.T) {
 	}
 	seen := 0
 	for _, want := range []int{3, 3, 1} {
-		n, err := d.Read(buffers, sizes, 8)
+		n, err := readAvailableLegacy(d, buffers, sizes, 8)
 		if err != nil || n != want {
 			t.Fatalf("bounded vector read = %d, %v; want %d", n, err, want)
 		}

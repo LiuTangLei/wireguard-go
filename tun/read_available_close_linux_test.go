@@ -11,7 +11,7 @@ func TestNativeReadAvailableCloseUnblocks(t *testing.T) {
 	d, _ := readAvailableFixture(t)
 	b, sizes := availableBuffers()
 	result := make(chan error, 1)
-	go func() { _, err := d.Read(b, sizes, 8); result <- err }()
+	go func() { _, err := readAvailableLegacy(d, b, sizes, 8); result <- err }()
 	time.Sleep(5 * time.Millisecond)
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestNativeReadAvailableOptOutRetainsOneRecordRead(t *testing.T) {
 		pushAvailable(t, fd, availableRecord([]byte{1, 2, 3, 4}, virtioNetHdr{}))
 	}
 	for range 3 {
-		n, err := d.Read(b, sizes, 8)
+		n, err := readAvailableLegacy(d, b, sizes, 8)
 		if n != 1 || err != nil {
 			t.Fatalf("ordinary read changed: %d %v", n, err)
 		}

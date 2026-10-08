@@ -231,7 +231,7 @@ func TestAWG31CookieRandomTrailerDoesNotPanic(t *testing.T) {
 	}
 	packet := make([]byte, MessageInitiationSize)
 	binary.LittleEndian.PutUint32(packet[4:8], 1)
-	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, endpoint: cookieTestEndpoint{}}); err != nil {
+	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, packetMeta: conn.ReceivedPacket{Endpoint: cookieTestEndpoint{}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := bind.sends.Load(); got != 1 {
@@ -243,7 +243,7 @@ func TestAWG31CookieRandomTrailerDoesNotPanic(t *testing.T) {
 	}
 	sendErr := fmt.Errorf("test cookie send failure")
 	bind.sendErr = sendErr
-	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, endpoint: cookieTestEndpoint{}}); !errors.Is(err, sendErr) {
+	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, packetMeta: conn.ReceivedPacket{Endpoint: cookieTestEndpoint{}}}); !errors.Is(err, sendErr) {
 		t.Fatalf("cookie send error = %v, want %v", err, sendErr)
 	}
 
@@ -251,7 +251,7 @@ func TestAWG31CookieRandomTrailerDoesNotPanic(t *testing.T) {
 		t.Fatal(err)
 	}
 	bind.sendErr = nil
-	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, endpoint: cookieTestEndpoint{}}); err != nil {
+	if err := device.SendHandshakeCookie(&QueueHandshakeElement{packet: packet, packetMeta: conn.ReceivedPacket{Endpoint: cookieTestEndpoint{}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := bind.sends.Load(); got != 3 {
@@ -297,11 +297,11 @@ func TestAWG31UnknownProtectedPacketDoesNotPanic(t *testing.T) {
 	applyHash(packet[awg.paddings.transport:awg.paddings.transport+4], unknownHeader[:], typeHash[:])
 
 	calls := 0
-	recv := conn.ReceiveFunc(func(packets [][]byte, sizes []int, endpoints []conn.Endpoint) (int, error) {
+	recv := conn.ReceiveFunc(func(slab []byte, packets []conn.ReceivedPacket) (int, error) {
 		calls++
 		if calls == 1 {
-			copy(packets[0], packet)
-			sizes[0] = len(packet)
+			copy(slab, packet)
+			packets[0] = conn.ReceivedPacket{Size: len(packet)}
 			return 1, nil
 		}
 		return 0, net.ErrClosed

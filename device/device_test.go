@@ -167,13 +167,13 @@ func (pair *testPair) Send(
 
 // genTestPair creates a testPair.
 func genTestPair(tb testing.TB, realSocket bool, extraCfg ...string) testPair {
- return genTestPairConfig(tb, realSocket, 1, extraCfg, nil)
+	return genTestPairConfig(tb, realSocket, 1, extraCfg, nil)
 }
 func genTestPairQueues(tb testing.TB, realSocket bool, queues int, opts ...Option) testPair {
- return genTestPairConfig(tb, realSocket, queues, nil, opts)
+	return genTestPairConfig(tb, realSocket, queues, nil, opts)
 }
 func genTestPairConfig(tb testing.TB, realSocket bool, queues int, extraCfg []string, opts []Option) (pair testPair) {
- cfg, endpointCfg := genConfigs(tb, extraCfg...)
+	cfg, endpointCfg := genConfigs(tb, extraCfg...)
 	var binds [2]conn.Bind
 	if realSocket {
 		binds[0], binds[1] = conn.NewDefaultBind(), conn.NewDefaultBind()

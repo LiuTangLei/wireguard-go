@@ -61,10 +61,15 @@ type tunQueue struct {
 	file    *os.File
 	rawConn syscall.RawConn
 
-	writeOpMu   sync.Mutex // writeOpMu guards the following fields
-	toWrite     groToWrite
-	tcpGROTable *tcpGROTable
-	udpGROTable *udpGROTable
+	readBatching   bool
+	readPendingLen int
+	readPendingErr error
+	readOpMu       sync.Mutex
+	readBuff       [virtioNetHdrLen + 65535]byte
+	writeOpMu      sync.Mutex // writeOpMu guards the following fields
+	toWrite        groToWrite
+	tcpGROTable    *tcpGROTable
+	udpGROTable    *udpGROTable
 }
 
 // appendQueue wraps file as a new queue of tun. It must be called before tun is
@@ -510,6 +515,22 @@ func (tun *NativeTun) Read(slab []byte, packets []ReadPacket) (int, error) {
 }
 
 func (q *tunQueue) Read(slab []byte, packets []ReadPacket) (int, error) {
+	q.readOpMu.Lock()
+	defer q.readOpMu.Unlock()
+	if q.readPendingErr != nil {
+		err := q.readPendingErr
+		q.readPendingErr = nil
+		return 0, err
+	}
+	if q.readPendingLen != 0 {
+		n := q.readPendingLen
+		q.readPendingLen = 0
+		return handleVirtioRead(q.readBuff[:n], slab, packets)
+	}
+	if q.readBatching {
+		return q.readAvailable(slab, packets)
+	}
+
 	select {
 	case err := <-q.tun.errors:
 		return 0, err

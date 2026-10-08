@@ -15,7 +15,7 @@ func TestNativeReadAvailableAfterClose(t *testing.T) {
 	if err := d.Close(); err != nil {
 		t.Fatal("repeated Close:", err)
 	}
-	n, err := d.Read(buffers, sizes, 8)
+	n, err := readAvailableLegacy(d, buffers, sizes, 8)
 	if n != 0 || !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("read after close = %d, %v; want os.ErrClosed", n, err)
 	}
@@ -26,7 +26,7 @@ func TestNativeReadAvailablePreservesAsyncError(t *testing.T) {
 	buffers, sizes := availableBuffers()
 	want := errors.New("test asynchronous TUN error")
 	d.errors <- want
-	n, err := d.Read(buffers, sizes, 8)
+	n, err := readAvailableLegacy(d, buffers, sizes, 8)
 	if n != 0 || err != want {
 		t.Fatalf("asynchronous error changed: %d, %v", n, err)
 	}

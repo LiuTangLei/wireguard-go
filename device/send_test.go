@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/tailscale/wireguard-go/tun"
+	"github.com/LiuTangLei/wireguard-go/tun"
 )
 
 func TestCopyPacketBufIfFits(t *testing.T) {

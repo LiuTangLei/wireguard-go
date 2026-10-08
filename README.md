@@ -182,3 +182,16 @@ Value is a sequence of tags specified below:
 
 > [!IMPORTANT]
 > If the final size of any packet exceeds system MTU, it would be fractured into fragments, which looks suspicious
+
+### Tailscale 1.104.1 compatibility
+
+Version v0.0.34 incorporates Tailscale wireguard-go
+`v0.0.0-20260928213032-417aef361226`: shared receive slabs, TUN queues,
+small outbound buffers, lazy-peer pre-shared keys, and handshake/replay metrics.
+The module path remains `github.com/LiuTangLei/wireguard-go`.
+AWG 3.1 prefixes/trailers and opt-in bounded ready TUN reads are preserved.
+AWG expansion uses separate pools so it cannot exhaust the bounded input pool
+while retaining an input slab.
+
+This release adopts the upstream slab-based `Read` and `ReceiveFunc` APIs;
+consumers of the old vector APIs must update their adapters.
